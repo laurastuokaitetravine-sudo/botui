@@ -17,8 +17,9 @@ MARGIN_USDT = 10 # Tavo nurodyta suma
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
-    if not data or data.get('passphrase') != MY_PASSWORD:
+    data = request.get_json(force=True, silent=True)
+
+ if not data or data.get('passphrase') != MY_PASSWORD:
         return "Unauthorized", 403
 
     try:
