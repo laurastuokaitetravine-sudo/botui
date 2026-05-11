@@ -12,7 +12,7 @@ exchange = ccxt.mexc({
     'options': {'defaultType': 'swap'}
 })
 
-MY_PASSWORD = "mano_slaptas_botas_123"
+MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
 MARGIN_USDT = 10
 
