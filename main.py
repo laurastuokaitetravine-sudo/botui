@@ -12,7 +12,7 @@ exchange = ccxt.mexc({
     'options': {'defaultType': 'swap'}
 })
 
-MY_PASSWORD = "mano_slaptas_botas_123" # Turi sutapti su TradingView passphrase
+MY_PASSWORD = "Ortofon121213!G" # Turi sutapti su TradingView passphrase
 LEVERAGE = 25
 MARGIN_USDT = 10
 
