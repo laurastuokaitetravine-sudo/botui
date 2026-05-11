@@ -6,8 +6,8 @@ app = Flask(__name__)
 
 # --- ĮRAŠYK SAVO RAKTUS ČIA ---
 exchange = ccxt.mexc({
-    'apiKey': 'TAVO_ACCESS_KEY',
-    'secret': 'TAVO_SECRET_KEY',
+    'apiKey': 'mx0vglmDs15A34AFNE',
+    'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
     'options': {'defaultType': 'swap'}
 })
 
