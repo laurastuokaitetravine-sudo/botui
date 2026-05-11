@@ -4,61 +4,66 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Pakeisk šiuos duomenis) ---
-MEXC_API_KEY = 'mx0vglHpZzjRqrv8jW'
-MEXC_SECRET_KEY = 'ba4961633f34493da9fede2010471ec6'
-WEBHOOK_PASSPHRASE = 'mano_slaptas_botas_123' # Sugalvok slaptažodį TradingView
-
-# Prisijungimas prie MEXC biržos
+# --- ĮRAŠYK SAVO RAKTUS ČIA ---
 exchange = ccxt.mexc({
-    'apiKey': MEXC_API_KEY,
-    'secret': MEXC_SECRET_KEY,
-    'options': {
-        'createMarketBuyOrderRequiresPrice': False
-    }
+    'apiKey': 'TAVO_ACCESS_KEY',
+    'secret': 'TAVO_SECRET_KEY',
+    'options': {'defaultType': 'swap'}
 })
+
+MY_PASSWORD = "mano_slaptas_botas_123"
+LEVERAGE = 25    # Tavo nurodytas svertas
+MARGIN_USDT = 10 # Tavo nurodyta suma
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. Gauname duomenis iš TradingView
     data = request.json
-    
-    # 2. Saugumo patikra
-    if not data or data.get('passphrase') != WEBHOOK_PASSPHRASE:
-        return jsonify({"status": "error", "message": "Neteisingas slaptazodis"}), 403
+    if not data or data.get('passphrase') != MY_PASSWORD:
+        return "Unauthorized", 403
 
     try:
         symbol = 'BTC/USDT'
-        # MEXC minimumas paprastai yra 5 USDT, tad 0.0002 BTC (~12-15$) tinka
-        amount = 0.0002 
+        action = data.get('action') # 'buy' arba 'short'
+        sl_price = float(data.get('sl'))
 
-        # 3. Logika: Jei TradingView sako "buy"
-        if data.get('action') == 'buy':
-            print(f"Gavau pirkimo signala: {symbol}")
-            
-            # Vykdome pirkimą rinkos kaina
-            buy_order = exchange.create_market_buy_order(symbol, amount)
-            
-            # Gauname tikslią kainą, už kiek nupirko
-            ticker = exchange.fetch_ticker(symbol)
-            entry_price = ticker['last']
-            
-            # 4. Automatiškai pastatome pardavimą (Take Profit) +2% pelno
-            profit_target = 1.02 # 1.02 reiškia +2%
-            tp_price = round(entry_price * profit_target, 2)
-            
-            sell_order = exchange.create_limit_sell_order(symbol, amount, tp_price)
-            
-            return jsonify({
-                "status": "success", 
-                "message": f"Nupirkta uz {entry_price}, TP nustatytas ties {tp_price}"
-            }), 200
+        # 1. Gauname įėjimo kainą
+        ticker = exchange.fetch_ticker(symbol)
+        entry_price = ticker['last']
+        
+        # 2. Skaičiuojame TP (1:2 santykis)
+        risk_distance = abs(entry_price - sl_price)
+        if action == 'short':
+            tp_price = entry_price - (risk_distance * 2)
+            side, close_side = 'sell', 'buy'
+        else:
+            tp_price = entry_price + (risk_distance * 2)
+            side, close_side = 'buy', 'sell'
+
+        # 3. Nustatom svertą biržoje
+        exchange.set_leverage(LEVERAGE, symbol)
+
+        # 4. Skaičiuojame kiekį (10 USDT * 25x / kaina)
+        amount = (MARGIN_USDT * LEVERAGE) / entry_price
+        amount = float(exchange.amount_to_precision(symbol, amount))
+        
+        # 5. Atidarome poziciją
+        exchange.create_order(symbol, 'market', side, amount)
+
+        # 6. Statome Stop Loss
+        exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
+            'stopPrice': sl_price, 'reduceOnly': True
+        })
+
+        # 7. Statome Take Profit (1:2)
+        exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
+            'reduceOnly': True
+        })
+
+        return f"Atidaryta {action}. SL: {sl_price}, TP: {tp_price}", 200
 
     except Exception as e:
-        print(f"Klaida: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
+        return str(e), 400
 
 if __name__ == '__main__':
-    # Render naudoja PORT aplinkos kintamąjį
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
