@@ -1,35 +1,33 @@
 import os
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Būtinai įrašyk savo MEXC API raktus) ---
+# --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
     'options': {'defaultType': 'swap'}
 })
 
-MY_PASSWORD = "Ortofon121213!G" # Turi sutapti su TradingView passphrase
+MY_PASSWORD = "mano_slaptas_botas_123"
 LEVERAGE = 25
 MARGIN_USDT = 10
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. Skaitome duomenis kaip paprastą tekstą, kad išvengtume 415 klaidos
     try:
         raw_data = request.get_data(as_text=True)
         data = json.loads(raw_data)
         print(f"Gautas signalas: {data}")
     except Exception as e:
         print(f"Klaida nuskaitant JSON: {e}")
-        return "Invalid JSON format", 400
+        return "Invalid JSON", 400
 
-    # 2. Saugumo patikra
     if not data or data.get('passphrase') != MY_PASSWORD:
-        print("Klaida: Neteisingas slaptažodis")
+        print("Klaida: Neteisingas slaptazodis")
         return "Unauthorized", 403
 
     try:
@@ -37,39 +35,41 @@ def webhook():
         action = data.get('action') # 'buy' arba 'short'
         sl_price = float(data.get('sl'))
 
-        # 3. Gauname dabartinę kainą (Entry)
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         
-        # 4. Skaičiuojame Take Profit (1:2 santykis)
         risk_distance = abs(entry_price - sl_price)
         if action == 'short':
             tp_price = entry_price - (risk_distance * 2)
             side, close_side = 'sell', 'buy'
+            pos_mode = 2 # Short position
         else:
             tp_price = entry_price + (risk_distance * 2)
             side, close_side = 'buy', 'sell'
+            pos_mode = 1 # Long position
 
-        # 5. Nustatome svertą biržoje
+        # 1. Nustatom svertą
         exchange.set_leverage(LEVERAGE, symbol)
 
-        # 6. Apskaičiuojame kiekį (10 USDT * 25x / kaina)
+        # 2. Skaičiuojame kiekį
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount = float(exchange.amount_to_precision(symbol, amount))
         
-        # 7. ATIDAROME POZICIJĄ
-        print(f"Vykdomas {action} užsakymas...")
-        exchange.create_order(symbol, 'market', side, amount)
+        # 3. ATIDAROME POZICIJĄ (Su positionMode pataisymu)
+        print(f"Vykdomas {action} uzsakymas...")
+        exchange.create_order(symbol, 'market', side, amount, params={'positionMode': pos_mode})
 
-        # 8. STATOME STOP LOSS
+        # 4. STATOME STOP LOSS
         exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
             'stopPrice': sl_price, 
-            'reduceOnly': True
+            'reduceOnly': True,
+            'positionMode': pos_mode
         })
 
-        # 9. STATOME TAKE PROFIT
+        # 5. STATOME TAKE PROFIT
         exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
-            'reduceOnly': True
+            'reduceOnly': True,
+            'positionMode': pos_mode
         })
 
         msg = f"Sekme! {action} atidarytas. SL: {sl_price}, TP: {tp_price}"
