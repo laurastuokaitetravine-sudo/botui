@@ -4,7 +4,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- ĮRAŠYK SAVO RAKTUS ČIA ---
+# --- KONFIGŪRACIJA (Įrašyk savo duomenis) ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
@@ -12,14 +12,17 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "mano_slaptas_botas_123"
-LEVERAGE = 25    # Tavo nurodytas svertas
-MARGIN_USDT = 10 # Tavo nurodyta suma
+LEVERAGE = 25
+MARGIN_USDT = 10
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    # Gauname duomenis ir priverčiame juos skaityti kaip JSON
     data = request.get_json(force=True, silent=True)
 
- if not data or data.get('passphrase') != MY_PASSWORD:
+    # 1. Saugumo patikra
+    if not data or data.get('passphrase') != MY_PASSWORD:
+        print("Klaida: Neteisingas slaptažodis arba tušti duomenys")
         return "Unauthorized", 403
 
     try:
@@ -27,11 +30,11 @@ def webhook():
         action = data.get('action') # 'buy' arba 'short'
         sl_price = float(data.get('sl'))
 
-        # 1. Gauname įėjimo kainą
+        # 2. Gauname dabartinę kainą
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         
-        # 2. Skaičiuojame TP (1:2 santykis)
+        # 3. Skaičiuojame TP (1:2 santykis)
         risk_distance = abs(entry_price - sl_price)
         if action == 'short':
             tp_price = entry_price - (risk_distance * 2)
@@ -40,29 +43,34 @@ def webhook():
             tp_price = entry_price + (risk_distance * 2)
             side, close_side = 'buy', 'sell'
 
-        # 3. Nustatom svertą biržoje
+        # 4. Nustatome svertą biržoje
         exchange.set_leverage(LEVERAGE, symbol)
 
-        # 4. Skaičiuojame kiekį (10 USDT * 25x / kaina)
+        # 5. Skaičiuojame kiekį
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount = float(exchange.amount_to_precision(symbol, amount))
         
-        # 5. Atidarome poziciją
+        # 6. ATIDAROME POZICIJĄ
+        print(f"Vykdomas {action} užsakymas...")
         exchange.create_order(symbol, 'market', side, amount)
 
-        # 6. Statome Stop Loss
+        # 7. STATOME STOP LOSS
         exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
-            'stopPrice': sl_price, 'reduceOnly': True
+            'stopPrice': sl_price, 
+            'reduceOnly': True
         })
 
-        # 7. Statome Take Profit (1:2)
+        # 8. STATOME TAKE PROFIT
         exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
             'reduceOnly': True
         })
 
-        return f"Atidaryta {action}. SL: {sl_price}, TP: {tp_price}", 200
+        msg = f"Sėkmė! {action} atidarytas. SL: {sl_price}, TP: {tp_price}"
+        print(msg)
+        return msg, 200
 
     except Exception as e:
+        print(f"Klaida vykdant sandorį: {str(e)}")
         return str(e), 400
 
 if __name__ == '__main__':
