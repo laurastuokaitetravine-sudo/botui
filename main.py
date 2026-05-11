@@ -14,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10
+MARGIN_USDT = 9.5 # Sumažinau iki 9.5, kad 100% užtektų mokesčiams
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -23,7 +23,6 @@ def webhook():
         data = json.loads(raw_data)
         print(f"Gautas signalas: {data}")
     except Exception as e:
-        print(f"Klaida nuskaitant JSON: {e}")
         return "Invalid JSON", 400
 
     if not data or data.get('passphrase') != MY_PASSWORD:
@@ -37,7 +36,6 @@ def webhook():
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         
-        # Paskaičiuojame kiekį ir TP (1:2)
         risk_distance = abs(entry_price - sl_price)
         if action == 'short':
             tp_price = entry_price - (risk_distance * 2)
@@ -46,41 +44,37 @@ def webhook():
             tp_price = entry_price + (risk_distance * 2)
             side, close_side, pos_mode = 'buy', 'sell', 1
 
-        # --- ISOLATED IR LEVERAGE NUSTATYMAS ---
+        # 1. Nustatom svertą (Isolated)
         try:
-            # MEXC reikalauja openType: 1 (Isolated)
-            exchange.set_leverage(LEVERAGE, symbol, params={
-                'openType': 1,      
-                'positionType': pos_mode
-            })
+            exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': pos_mode})
         except:
-            pass # Jei jau nustatyta, ignoruojame klaida
+            pass
 
+        # 2. Skaičiuojame kiekį
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount = float(exchange.amount_to_precision(symbol, amount))
         
-        # 1. ATIDAROME POZICIJĄ
+        # 3. ATIDAROME POZICIJĄ (SVARBU: pridedame openType ir positionMode)
+        print(f"Atidarau {action}...")
         exchange.create_order(symbol, 'market', side, amount, params={
             'positionMode': pos_mode,
-            'openType': 1
+            'openType': 1 # 1 reiškia OPEN (atidaryti naują)
         })
 
-        # 2. STOP LOSS
+        # 4. STOP LOSS
         exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
             'stopPrice': sl_price, 
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
-        # 3. TAKE PROFIT
+        # 5. TAKE PROFIT
         exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
-        msg = f"Sekme! {action} atidarytas Isolated rezime. SL: {sl_price}, TP: {tp_price}"
-        print(msg)
-        return msg, 200
+        return f"Sekme! {action} atidarytas.", 200
 
     except Exception as e:
         print(f"Klaida: {str(e)}")
