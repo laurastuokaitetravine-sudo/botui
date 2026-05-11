@@ -33,10 +33,10 @@ def webhook():
         # 2. Skaičiuojame TP (1:2 santykis)
         risk_distance = abs(entry_price - sl_price)
         if action == 'short':
-            tp_price = entry_price - (risk_distance * 2)
+            tp_price = entry_price - (risk_distance * 1)
             side, close_side = 'sell', 'buy'
         else:
-            tp_price = entry_price + (risk_distance * 2)
+            tp_price = entry_price + (risk_distance * 1)
             side, close_side = 'buy', 'sell'
 
         # 3. Nustatom svertą biržoje
