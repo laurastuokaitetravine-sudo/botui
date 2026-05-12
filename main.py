@@ -39,59 +39,60 @@ def webhook():
         symbol = 'BTC_USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 1. Gauti kainą iš FUTURES API
-        ticker = exchange.contractPublicGetTicker({'symbol': symbol})
+        # 1. GAUNAME KAINĄ (Pataisyta struktūra)
+        ticker_response = exchange.contractPublicGetTicker({'symbol': symbol})
+        
+        # MEXC API duomenys visada sėdi po 'data' raktu
+        if 'data' in ticker_response:
+            entry_price = float(ticker_response['data']['fairPrice'])
+        else:
+            entry_price = float(ticker_response['fairPrice'])
 
-        # Tavo CCXT versija turi tik lastPrice
-        if 'lastPrice' not in ticker:
-            raise Exception("MEXC ticker neturi lastPrice — CCXT versija per sena")
+        print(f"Entry kaina: {entry_price}")
 
-        entry_price = float(ticker['lastPrice'])
-        print(f"Entry kaina (lastPrice): {entry_price}")
-
-        # 2. Skaičiavimai
+        # 2. SKAIČIAVIMAI
         risk_distance = sl_price_raw - entry_price
-        tp_price = entry_price - (risk_distance * 2)
+        tp_price = round(entry_price - (risk_distance * 2), 1)
         amount = round((MARGIN_USDT * LEVERAGE) / entry_price, 4)
 
-        # 3. SHORT atidarymas
+        # 3. SHORT ATIDARYMAS
         print(f"Atidarau SHORT: {amount} BTC...")
         order_open = exchange.contractPrivatePostOrderSubmit({
             'symbol': symbol,
             'side': 2,        # 2 = Open Short
             'vol': amount,
             'leverage': LEVERAGE,
-            'openType': 1,    # Isolated
-            'orderType': 2    # Market
+            'openType': 1,    # 1 = Isolated
+            'orderType': 2    # 2 = Market
         })
-        print("SHORT atidarytas.")
+        print(f"SHORT užsakymas išsiųstas: {order_open}")
 
-        time.sleep(1.5)
+        time.sleep(2)
 
         # 4. STOP LOSS
         print(f"Nustatau SL ties {sl_price_raw}")
         exchange.contractPrivatePostPlanorderSubmit({
             'symbol': symbol,
-            'side': 4,               # Close Short
+            'side': 4,               # 4 = Close Short
             'vol': amount,
             'triggerPrice': sl_price_raw,
-            'triggerType': 1,
-            'executeCycle': 1,
-            'orderType': 2,
-            'trend': 1               # Up
+            'triggerType': 1,        # 1 = Last Price
+            'executeCycle': 1,       # 1 = Lasting
+            'orderType': 2,          # 2 = Market
+            'trend': 1               # 1 = Up
         })
 
         # 5. TAKE PROFIT
         print(f"Nustatau TP ties {tp_price}")
         exchange.contractPrivatePostPlanorderSubmit({
             'symbol': symbol,
-            'side': 4,
+            'side': 4,               # 4 = Close Short
             'vol': amount,
             'triggerPrice': tp_price,
-            'triggerType': 1,
-            'executeCycle': 1,
-            'orderType': 2,
-            'trend': 2               # Down
+            'triggerType': 1,        # 1 = Last Price
+            'executeCycle': 1,       # 1 = Lasting
+            'orderType': 2,          # 2 = Market
+            'trend': 2               # 2 = Down
         })
 
         return {"status": "success"}, 200
@@ -100,7 +101,6 @@ def webhook():
         print("--- KRITINĖ KLAIDA ---")
         print(traceback.format_exc())
         return str(e), 400
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
