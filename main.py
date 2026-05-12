@@ -27,7 +27,8 @@ def webhook():
     raw_body = request.get_data(as_text=True)
     try:
         data = json.loads(raw_body)
-        print(f"Gautas signalas: {data}")
+        print(f"--- GAUTAS SIGNALAS ---")
+        print(f"Raw data: {data}")
     except:
         return "Invalid JSON", 400
 
@@ -35,21 +36,22 @@ def webhook():
         return "Unauthorized", 403
 
     try:
-        symbol = 'BTC_USDT' # Tiesioginiam API naudojame su '_'
+        symbol = 'BTC_USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 1. Gauname fairPrice tiesiai iš Futures API
+        # 1. TEISINGA: Gauname fairPrice iš FUTURES API
         response = exchange.contractPublicGetTicker({'symbol': symbol})
-        entry_price = float(response['data']['fairPrice'])
-        
+        entry_price = float(response['fairPrice'])
+
+        print(f"Entry kaina (fairPrice): {entry_price}")
+
         # 2. Skaičiavimai
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
         amount = round((MARGIN_USDT * LEVERAGE) / entry_price, 4)
-        
-        # 3. ATIDAROME SHORT (Naudojame TIESIOGINĮ kontraktų metodą)
+
+        # 3. ATIDAROME SHORT
         print(f"Vykdomas SHORT atidarymas: {amount} BTC...")
-        # Šis metodas garantuotai kreipiasi į ://mexc.com (Futures)
         order_open = exchange.contractPrivatePostOrder({
             'symbol': symbol,
             'side': 2,       # 2 = Open Short
@@ -58,23 +60,25 @@ def webhook():
             'openType': 1,   # 1 = Isolated
             'leverage': LEVERAGE
         })
-        print(f"Sėkmė! ID: {order_open.get('data')}")
-        
+        print(f"Sėkmė! Atidaryta.")
+
         time.sleep(1.5)
 
-        # 4. STOP LOSS (Tiesioginis Planinis užsakymas)
+        # 4. STOP LOSS
+        print(f"Nustatau SL ties {round(sl_price_raw, 1)}")
         exchange.contractPrivatePostPlanOrder({
             'symbol': symbol,
             'side': 4,            # 4 = Close Short
             'vol': amount,
             'triggerPrice': round(sl_price_raw, 1),
-            'triggerType': 1,     # 1 = Last Price
-            'executeCycle': 1,    # 1 = Lasting
-            'orderType': 2,       # 2 = Market trigger
-            'trend': 1            # 1 = Up (kaina kyla)
+            'triggerType': 1,
+            'executeCycle': 1,
+            'orderType': 2,
+            'trend': 1            # 1 = Up
         })
 
-        # 5. TAKE PROFIT (Tiesioginis Planinis užsakymas)
+        # 5. TAKE PROFIT
+        print(f"Nustatau TP ties {round(tp_price, 1)}")
         exchange.contractPrivatePostPlanOrder({
             'symbol': symbol,
             'side': 4,
@@ -83,7 +87,7 @@ def webhook():
             'triggerType': 1,
             'executeCycle': 1,
             'orderType': 2,
-            'trend': 2            # 2 = Down (kaina krenta)
+            'trend': 2            # 2 = Down
         })
 
         return {"status": "success"}, 200
