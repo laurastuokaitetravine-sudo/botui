@@ -20,6 +20,7 @@ MARGIN_USDT = 9.0  # Rizikuojama suma
 def home():
     return "SHORT BOTAS VEIKIA!", 200
 
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     # 1. JSON gavimas
@@ -34,39 +35,42 @@ def webhook():
     if not data or data.get('passphrase') != MY_PASSWORD:
         return "Unauthorized", 403
 
+    # 3. Tik SHORT signalai
+    if data.get("action") != "short":
+        return "Klaida: šis botas priima tik SHORT signalus", 400
+
     try:
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 3. Kainos gavimas – naudojam markPrice, ne last
-        ticker = exchange.fetch_ticker(symbol)
-        info = ticker.get('info', {})
+        # 4. Futures markPrice gavimas
+        ticker = exchange.fapiPublicGetTicker({'symbol': 'BTC_USDT'})
 
-        if 'markPrice' not in info:
-            print(f"Ticker info be markPrice: {info}")
-            return "Klaida: negauta markPrice iš MEXC", 400
+        if 'markPrice' not in ticker:
+            print(f"Ticker info be markPrice: {ticker}")
+            return "Klaida: negauta markPrice iš MEXC futures", 400
 
-        entry_price = float(info['markPrice'])
+        entry_price = float(ticker['markPrice'])
         print(f"Naudojama entry kaina (markPrice): {entry_price}")
 
         if entry_price <= 0:
             return "Klaida: negauta teisinga BTC kaina", 400
 
-        # 4. SL logika – SHORT, tai SL turi būti AUKŠČIAU kainos
+        # 5. SL logika – SHORT → SL turi būti aukščiau kainos
         if sl_price_raw <= entry_price:
             return "Klaida: SL turi būti aukščiau dabartinės kainos SHORT pozicijai!", 400
 
-        # 5. TP skaičiavimas (RR 1:2)
+        # 6. TP skaičiavimas (RR 1:2)
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
-        # 6. Leverage nustatymas
+        # 7. Leverage nustatymas
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
         except Exception as e:
             print(f"Leverage klaida (tęsiam be jos): {e}")
 
-        # 7. Kiekio skaičiavimas
+        # 8. Kiekio skaičiavimas
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         if amount <= 0:
             print(f"Blogas amount: {amount}, entry_price: {entry_price}")
@@ -82,7 +86,7 @@ def webhook():
 
         print(f"Skaičiuojamas amount: {amount_f}, SL: {sl_f}, TP: {tp_f}")
 
-        # 8. SHORT atidarymas – MARKET SELL
+        # 9. SHORT atidarymas – MARKET SELL
         print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
         order_open = exchange.create_order(
             symbol,
@@ -99,7 +103,7 @@ def webhook():
 
         time.sleep(1.5)
 
-        # 9. STOP LOSS – MEXC trigger order (SHORT → BUY kai kaina KYLA)
+        # 10. STOP LOSS – MEXC trigger order (SHORT → BUY kai kaina KYLA)
         print(f"Nustatau SL (trigger): {sl_price_str}")
         sl_order = exchange.create_order(
             symbol,
@@ -116,7 +120,7 @@ def webhook():
         )
         print(f"SL orderis: {sl_order}")
 
-        # 10. TAKE PROFIT – MEXC trigger limit (SHORT → BUY kai kaina KRENTA)
+        # 11. TAKE PROFIT – MEXC trigger limit (SHORT → BUY kai kaina KRENTA)
         print(f"Nustatau TP (trigger limit): {tp_price_str}")
         tp_order = exchange.create_order(
             symbol,
@@ -138,6 +142,7 @@ def webhook():
     except Exception as e:
         print(f"Klaida: {str(e)}")
         return str(e), 400
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
