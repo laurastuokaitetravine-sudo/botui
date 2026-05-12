@@ -14,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.0 # Šiek tiek sumažinau saugumui
+MARGIN_USDT = 9.0  # Rizikuojama suma
 
 @app.route('/')
 def home():
@@ -22,12 +22,15 @@ def home():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    # 1. JSON gavimas
     try:
         data = request.get_json(force=True)
         print(f"Gautas signalas: {data}")
-    except:
+    except Exception as e:
+        print(f"JSON klaida: {e}")
         return "Invalid JSON", 400
 
+    # 2. Slaptažodis
     if not data or data.get('passphrase') != MY_PASSWORD:
         return "Unauthorized", 403
 
@@ -35,48 +38,100 @@ def webhook():
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
+        # 3. Kainos gavimas – naudojam markPrice, ne last
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = ticker['last']
-        
-        if sl_price_raw <= entry_price:
-            return f"Klaida: SL turi buti auksciau kainos!", 400
+        info = ticker.get('info', {})
 
+        if 'markPrice' not in info:
+            print(f"Ticker info be markPrice: {info}")
+            return "Klaida: negauta markPrice iš MEXC", 400
+
+        entry_price = float(info['markPrice'])
+        print(f"Naudojama entry kaina (markPrice): {entry_price}")
+
+        if entry_price <= 0:
+            return "Klaida: negauta teisinga BTC kaina", 400
+
+        # 4. SL logika – SHORT, tai SL turi būti AUKŠČIAU kainos
+        if sl_price_raw <= entry_price:
+            return "Klaida: SL turi būti aukščiau dabartinės kainos SHORT pozicijai!", 400
+
+        # 5. TP skaičiavimas (RR 1:2)
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
+        # 6. Leverage nustatymas
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
-        except: pass
+        except Exception as e:
+            print(f"Leverage klaida (tęsiam be jos): {e}")
 
-        # Skaičiuojame kiekį
+        # 7. Kiekio skaičiavimas
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
+        if amount <= 0:
+            print(f"Blogas amount: {amount}, entry_price: {entry_price}")
+            return "Klaida: amount <= 0", 400
+
         amount_str = exchange.amount_to_precision(symbol, amount)
         sl_price_str = exchange.price_to_precision(symbol, sl_price_raw)
         tp_price_str = exchange.price_to_precision(symbol, tp_price)
-        
-        # 3. ATIDARYMAS
-        print(f"Atidarau SHORT: {amount_str} BTC...")
-        exchange.create_order(symbol, 'market', 'sell', float(amount_str), None, {
-            'openType': 1,
-            'positionMode': 2
-        })
-        
-        time.sleep(1.5) 
 
-        # 4. STOP LOSS
-        print(f"SL: {sl_price_str}")
-        exchange.create_order(symbol, 'stop_market', 'buy', float(amount_str), None, {
-            'stopPrice': float(sl_price_str),
-            'reduceOnly': True,
-            'positionMode': 2
-        })
+        amount_f = float(amount_str)
+        sl_f = float(sl_price_str)
+        tp_f = float(tp_price_str)
 
-        # 5. TAKE PROFIT
-        print(f"TP: {tp_price_str}")
-        exchange.create_order(symbol, 'limit', 'buy', float(amount_str), float(tp_price_str), {
-            'reduceOnly': True,
-            'positionMode': 2
-        })
+        print(f"Skaičiuojamas amount: {amount_f}, SL: {sl_f}, TP: {tp_f}")
+
+        # 8. SHORT atidarymas – MARKET SELL
+        print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
+        order_open = exchange.create_order(
+            symbol,
+            'market',
+            'sell',
+            amount_f,
+            None,
+            {
+                'openType': 1,
+                'positionMode': 2
+            }
+        )
+        print(f"SHORT atidarytas: {order_open}")
+
+        time.sleep(1.5)
+
+        # 9. STOP LOSS – MEXC trigger order (SHORT → BUY kai kaina KYLA)
+        print(f"Nustatau SL (trigger): {sl_price_str}")
+        sl_order = exchange.create_order(
+            symbol,
+            'trigger',
+            'buy',
+            amount_f,
+            None,
+            {
+                'triggerPrice': sl_f,
+                'triggerDirection': 1,  # 1 = trigger when price rises
+                'reduceOnly': True,
+                'positionMode': 2
+            }
+        )
+        print(f"SL orderis: {sl_order}")
+
+        # 10. TAKE PROFIT – MEXC trigger limit (SHORT → BUY kai kaina KRENTA)
+        print(f"Nustatau TP (trigger limit): {tp_price_str}")
+        tp_order = exchange.create_order(
+            symbol,
+            'trigger',
+            'buy',
+            amount_f,
+            tp_f,
+            {
+                'triggerPrice': tp_f,
+                'triggerDirection': 2,  # 2 = trigger when price falls
+                'reduceOnly': True,
+                'positionMode': 2
+            }
+        )
+        print(f"TP orderis: {tp_order}")
 
         return {"status": "success"}, 200
 
