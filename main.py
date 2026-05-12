@@ -16,15 +16,12 @@ MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
 MARGIN_USDT = 9.5  # suma pozicijai
 
-# --- UNIVERSALUS JSON PRIĖMIMAS ---
+
+# --- UNIVERSALUS JSON PRIĖMIMAS + DEBUG ---
 def extract_json():
-    """
-    Priima JSON iš:
-    - TradingView (raw JSON)
-    - PowerShell (raw JSON)
-    - HTML formos (form-data)
-    - text/plain formos
-    """
+    # DEBUG – matysime, ką naršyklė iš tikro siunčia
+    print("RAW BODY:", request.get_data(as_text=True))
+    print("FORM DATA:", request.form)
 
     # 1. Tikras JSON (TradingView, Postman)
     if request.is_json:
