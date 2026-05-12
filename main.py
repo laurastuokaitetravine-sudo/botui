@@ -20,7 +20,7 @@ MARGIN_USDT = 9.0
 
 @app.route('/')
 def home():
-    return "SHORT BOTAS VEIKIA (FUTURES API)!", 200
+    return "SHORT BOTAS VEIKIA!", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -39,60 +39,65 @@ def webhook():
         symbol = 'BTC_USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 1. GAUNAME KAINĄ (Pataisyta struktūra)
+        # 1. Gauti kainą (patobulinta paieška)
         ticker_response = exchange.contractPublicGetTicker({'symbol': symbol})
         
-        # MEXC API duomenys visada sėdi po 'data' raktu
-        if 'data' in ticker_response:
-            entry_price = float(ticker_response['data']['fairPrice'])
-        else:
-            entry_price = float(ticker_response['fairPrice'])
+        # MEXC duomenys dažniausiai būna po 'data' raktu
+        res = ticker_response.get('data', ticker_response)
+        
+        # Bandom surasti bet kokią kainą iš galimų laukų
+        entry_price = res.get('fairPrice') or res.get('lastPrice') or res.get('price') or res.get('indexPrice')
+        
+        if not entry_price:
+            print(f"DEBUG: Ticker atsakymas: {ticker_response}")
+            raise Exception("Nepavyko rasti kainos MEXC atsakyme")
 
-        print(f"Entry kaina: {entry_price}")
+        entry_price = float(entry_price)
+        print(f"Naudojama entry kaina: {entry_price}")
 
-        # 2. SKAIČIAVIMAI
+        # 2. Skaičiavimai
         risk_distance = sl_price_raw - entry_price
-        tp_price = round(entry_price - (risk_distance * 2), 1)
+        tp_price = entry_price - (risk_distance * 2)
         amount = round((MARGIN_USDT * LEVERAGE) / entry_price, 4)
 
-        # 3. SHORT ATIDARYMAS
+        # 3. SHORT atidarymas
         print(f"Atidarau SHORT: {amount} BTC...")
         order_open = exchange.contractPrivatePostOrderSubmit({
             'symbol': symbol,
             'side': 2,        # 2 = Open Short
             'vol': amount,
             'leverage': LEVERAGE,
-            'openType': 1,    # 1 = Isolated
-            'orderType': 2    # 2 = Market
+            'openType': 1,    # Isolated
+            'orderType': 2    # Market
         })
-        print(f"SHORT užsakymas išsiųstas: {order_open}")
+        print(f"SHORT atidarytas: {order_open}")
 
-        time.sleep(2)
+        time.sleep(1.5)
 
         # 4. STOP LOSS
         print(f"Nustatau SL ties {sl_price_raw}")
         exchange.contractPrivatePostPlanorderSubmit({
             'symbol': symbol,
-            'side': 4,               # 4 = Close Short
+            'side': 4,               # Close Short
             'vol': amount,
             'triggerPrice': sl_price_raw,
-            'triggerType': 1,        # 1 = Last Price
-            'executeCycle': 1,       # 1 = Lasting
-            'orderType': 2,          # 2 = Market
-            'trend': 1               # 1 = Up
+            'triggerType': 1,
+            'executeCycle': 1,
+            'orderType': 2,
+            'trend': 1               # Up
         })
 
         # 5. TAKE PROFIT
         print(f"Nustatau TP ties {tp_price}")
         exchange.contractPrivatePostPlanorderSubmit({
             'symbol': symbol,
-            'side': 4,               # 4 = Close Short
+            'side': 4,
             'vol': amount,
             'triggerPrice': tp_price,
-            'triggerType': 1,        # 1 = Last Price
-            'executeCycle': 1,       # 1 = Lasting
-            'orderType': 2,          # 2 = Market
-            'trend': 2               # 2 = Down
+            'triggerType': 1,
+            'executeCycle': 1,
+            'orderType': 2,
+            'trend': 2               # Down
         })
 
         return {"status": "success"}, 200
