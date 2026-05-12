@@ -47,13 +47,13 @@ def webhook():
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
-        # 1. Sverto nustatymas
+        # 1. Sverto nustatymas (PositionMode 2 = Short)
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
         except:
             pass
 
-        # 2. Tikslumo nustatymai
+        # 2. Tikslumo nustatymai (MEXC reikalauja specifinio apvalinimo)
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount_str = exchange.amount_to_precision(symbol, amount)
         tp_price_str = exchange.price_to_precision(symbol, tp_price)
@@ -61,32 +61,30 @@ def webhook():
         
         # 3. ATIDAROME SHORT POZICIJĄ
         print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
-        # MEXC reikalauja entry_price net market užsakymui, kad išvengtume 700004 klaidos
-        exchange.create_order(symbol, 'market', 'sell', amount_str, entry_price, {
+        # Naudojame float() konvertavimą, kad išvengtume "invalid type" klaidų
+        exchange.create_order(symbol, 'market', 'sell', float(amount_str), float(entry_price), {
             'openType': 1,
             'positionMode': 2
         })
         
         time.sleep(1.5) 
 
-        # 4. STOP LOSS (SVARBU: čia perduodame sl_price_raw du kartus)
+        # 4. STOP LOSS (uždarymas su 'buy')
         print(f"Nustatau SL ties {sl_price_str}")
-        exchange.create_order(symbol, 'stop_market', 'buy', amount_str, sl_price_raw, {
-            'stopPrice': sl_price_str, 
-            'price': sl_price_str,      # Dubliuojame kainą dėl MEXC API specifikos
-            'reduceOnly': True,
-            'positionMode': 2,
-            'triggerType': 1            # Naudoti Last Price kaip trigerį
-        })
-
-        # 5. TAKE PROFIT
-        print(f"Nustatau TP ties {tp_price_str}")
-        exchange.create_order(symbol, 'limit', 'buy', amount_str, tp_price_str, {
+        exchange.create_order(symbol, 'stop_market', 'buy', float(amount_str), float(sl_price_str), {
+            'stopPrice': float(sl_price_str), 
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        return {"status": "success", "msg": "Viskas suveike"}, 200
+        # 5. TAKE PROFIT (uždarymas su 'buy' limit)
+        print(f"Nustatau TP ties {tp_price_str}")
+        exchange.create_order(symbol, 'limit', 'buy', float(amount_str), float(tp_price_str), {
+            'reduceOnly': True,
+            'positionMode': 2
+        })
+
+        return {"status": "success", "msg": "Pozicija, SL ir TP sukurti sėkmingai"}, 200
 
     except Exception as e:
         print(f"Klaida: {str(e)}")
