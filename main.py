@@ -11,125 +11,81 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
-    'options': {
-        'defaultType': 'swap'  # Nurodome naudoti Futures (Swap) rinką
-    }
+    'options': {'defaultType': 'swap'}
 })
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.0  # Suma, skirta vienam sandoriui
+MARGIN_USDT = 9.0 
 
 @app.route('/')
 def home():
-    return "BOTAS GYVAS! Paruošta SHORT signalams.", 200
-
-@app.route('/test')
-def test_connection():
-    try:
-        response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
-        price = response['data']['fairPrice']
-        return f"Ryšys su MEXC Futures geras. BTC kaina: {price}", 200
-    except Exception as e:
-        return f"MEXC ryšio klaida: {str(e)}", 500
+    return "SHORT BOTAS VEIKIA (DIRECT FUTURES API)!", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. SAUGUS DUOMENŲ GAVIMAS
     raw_body = request.get_data(as_text=True)
-    print(f"--- GAUTAS SIGNALAS ---")
-    print(f"Raw data: '{raw_body}'")
-
     try:
         data = json.loads(raw_body)
-    except Exception as e:
-        print(f"JSON klaida: {str(e)}")
-        return "Invalid JSON format", 400
+        print(f"Gautas signalas: {data}")
+    except:
+        return "Invalid JSON", 400
 
-    # 2. PATIKROS
-    if data.get('passphrase') != MY_PASSWORD:
+    if data.get('passphrase') != MY_PASSWORD or data.get('action') != 'short':
         return "Unauthorized", 403
 
-    if data.get('action') != 'short':
-        return "Tik SHORT signalai priimami", 400
-
     try:
-        # SVARBU: Simbolis su ':USDT' galūne priverčia ccxt naudoti Futures API
-        symbol = 'BTC/USDT:USDT'
+        symbol = 'BTC_USDT' # Tiesioginiam API naudojame su '_'
         sl_price_raw = float(data.get('sl'))
 
-        # 3. KAINOS GAVIMAS
-        response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
+        # 1. Gauname fairPrice tiesiai iš Futures API
+        response = exchange.contractPublicGetTicker({'symbol': symbol})
         entry_price = float(response['data']['fairPrice'])
-        print(f"Entry kaina: {entry_price}")
-
-        if sl_price_raw <= entry_price:
-            return f"Klaida: SL turi buti virs kainos!", 400
-
-        # 4. KIEKIAI IR APVALINIMAS
+        
+        # 2. Skaičiavimai
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
-
-        # Nustatom svertą
-        try:
-            exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
-        except: pass
-
-        amount_str = exchange.amount_to_precision(symbol, (MARGIN_USDT * LEVERAGE) / entry_price)
-        sl_str = exchange.price_to_precision(symbol, sl_price_raw)
-        tp_str = exchange.price_to_precision(symbol, tp_price)
-
-        amount_f = float(amount_str)
-        sl_f = float(sl_str)
-        tp_f = float(tp_str)
-
-        # 5. ATIDARYMAS (MARKET SELL)
-        print(f"Vykdomas SHORT atidarymas: {amount_f} BTC...")
-        order_open = exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='sell',
-            amount=amount_f,
-            price=None,
-            params={
-                'openType': 1,      # Isolated
-                'positionMode': 2   # Short
-            }
-        )
-        print(f"Sėkmingai atidaryta ID: {order_open.get('id', 'OK')}")
+        amount = round((MARGIN_USDT * LEVERAGE) / entry_price, 4)
         
-        time.sleep(2)
+        # 3. ATIDAROME SHORT (Naudojame TIESIOGINĮ kontraktų metodą)
+        print(f"Vykdomas SHORT atidarymas: {amount} BTC...")
+        # Šis metodas garantuotai kreipiasi į ://mexc.com (Futures)
+        order_open = exchange.contractPrivatePostOrder({
+            'symbol': symbol,
+            'side': 2,       # 2 = Open Short
+            'orderType': 2,  # 2 = Market
+            'vol': amount,
+            'openType': 1,   # 1 = Isolated
+            'leverage': LEVERAGE
+        })
+        print(f"Sėkmė! ID: {order_open.get('data')}")
+        
+        time.sleep(1.5)
 
-        # 6. STOP LOSS (STOP MARKET)
-        print(f"Nustatau SL: {sl_f}")
-        exchange.create_order(
-            symbol=symbol,
-            type='stop_market',
-            side='buy',
-            amount=amount_f,
-            price=None,
-            params={
-                'stopPrice': sl_f,
-                'reduceOnly': True,
-                'positionMode': 2
-            }
-        )
+        # 4. STOP LOSS (Tiesioginis Planinis užsakymas)
+        exchange.contractPrivatePostPlanOrder({
+            'symbol': symbol,
+            'side': 4,            # 4 = Close Short
+            'vol': amount,
+            'triggerPrice': round(sl_price_raw, 1),
+            'triggerType': 1,     # 1 = Last Price
+            'executeCycle': 1,    # 1 = Lasting
+            'orderType': 2,       # 2 = Market trigger
+            'trend': 1            # 1 = Up (kaina kyla)
+        })
 
-        # 7. TAKE PROFIT (LIMIT)
-        print(f"Nustatau TP: {tp_f}")
-        exchange.create_order(
-            symbol=symbol,
-            type='limit',
-            side='buy',
-            amount=amount_f,
-            price=tp_f,
-            params={
-                'reduceOnly': True,
-                'positionMode': 2
-            }
-        )
+        # 5. TAKE PROFIT (Tiesioginis Planinis užsakymas)
+        exchange.contractPrivatePostPlanOrder({
+            'symbol': symbol,
+            'side': 4,
+            'vol': amount,
+            'triggerPrice': round(tp_price, 1),
+            'triggerType': 1,
+            'executeCycle': 1,
+            'orderType': 2,
+            'trend': 2            # 2 = Down (kaina krenta)
+        })
 
-        print("SĖKMĖ: Visi užsakymai sukurti!")
         return {"status": "success"}, 200
 
     except Exception as e:
