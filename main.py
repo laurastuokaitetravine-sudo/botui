@@ -7,8 +7,8 @@ app = Flask(__name__)
 
 # --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
-    'apiKey': os.getenv('mx0vglT4ta6TAGvGsZ'),
-    'secret': os.getenv('6b588e8b0da64ff8b28c6b798d357434'),
+    'apiKey': os.getenv('mx0vgleJMChBkcG2iW'),
+    'secret': os.getenv('f9b202a9d2c94003832752f473943175'),
     'options': {'defaultType': 'swap'}
 })
 
