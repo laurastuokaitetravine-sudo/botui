@@ -1,112 +1,109 @@
 import os
 import json
+import traceback
 from flask import Flask, request
 import ccxt
-import time
-import traceback
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudok environment variables!) ---
 exchange = ccxt.mexc({
-    'apiKey': 'mx0vglmDs15A34AFNE',
-    'secret': '7f79ccbe92a7d9d0de77ea',
+    'apiKey': os.getenv('mx0vglmDs15A34AFNE')
+    'secret': os.getenv('7f79ccbe92ac42af94e897d9d0de77ea')
     'options': {'defaultType': 'swap'}
 })
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
 MARGIN_USDT = 9.0 
+SYMBOL = 'BTC/USDT:USDT'  # CCXT standartas MEXC futures
 
 @app.route('/')
 def home():
-    return "SHORT BOTAS VEIKIA!", 200
+    return "BOTAS ONLINE", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    raw_body = request.get_data(as_text=True)
     try:
-        data = json.loads(raw_body)
-        print(f"--- GAUTAS SIGNALAS ---")
-        print(data)
-    except:
-        return "Invalid JSON", 400
-
-    if data.get('passphrase') != MY_PASSWORD or data.get('action') != 'short':
-        return "Unauthorized", 403
-
-    try:
-        symbol = 'BTC_USDT'
-        sl_price_raw = float(data.get('sl'))
-
-        # 1. Gauti kainą (patobulinta paieška)
-        ticker_response = exchange.contractPublicGetTicker({'symbol': symbol})
+        data = request.json
+        if not data:
+            return "No data", 400
         
-        # MEXC duomenys dažniausiai būna po 'data' raktu
-        res = ticker_response.get('data', ticker_response)
+        print(f"Gautas signalas: {data}")
+
+        # Patikra
+        if data.get('passphrase') != MY_PASSWORD or data.get('action') != 'short':
+            return "Unauthorized", 403
+
+        # 1. Gauname rinkos duomenis ir kainą
+        market = exchange.load_markets()[SYMBOL]
+        ticker = exchange.fetch_ticker(SYMBOL)
+        entry_price = ticker['last']
         
-        # Bandom surasti bet kokią kainą iš galimų laukų
-        entry_price = res.get('fairPrice') or res.get('lastPrice') or res.get('price') or res.get('indexPrice')
+        sl_price = float(data.get('sl'))
+        risk_dist = sl_price - entry_price
+        tp_price = entry_price - (risk_dist * 2)
+
+        # 2. Skaičiuojame kiekį (BTC) pagal maržą ir svertą
+        # amount = (9 USDT * 25) / kaina
+        raw_amount = (MARGIN_USDT * LEVERAGE) / entry_price
+        amount = exchange.amount_to_precision(SYMBOL, raw_amount)
+
+        print(f"Entry: {entry_price}, SL: {sl_price}, TP: {tp_price}, Kiekis: {amount}")
+
+        # 3. Atidarome SHORT (Market Order)
+        # MEXC swap rinkoje Short = side: 'sell'
+        order = exchange.create_order(
+            symbol=SYMBOL,
+            type='market',
+            side='sell',
+            amount=amount,
+            params={
+                'leverage': LEVERAGE,
+                'openType': 1, # Isolated
+                'posSide': 'SHORT' 
+            }
+        )
+        print(f"Short atidarytas: {order['id']}")
+
+        # 4. Nustatome Stop Loss ir Take Profit
+        # Naudojame params, nes MEXC reikalauja specifinių triggerių
         
-        if not entry_price:
-            print(f"DEBUG: Ticker atsakymas: {ticker_response}")
-            raise Exception("Nepavyko rasti kainos MEXC atsakyme")
+        # Stop Loss
+        exchange.create_order(
+            symbol=SYMBOL,
+            type='limit', # Planorderiai dažnai siunčiami kaip limit/market trigger
+            side='buy',   # Uždaryti Short reikia Buy operacija
+            amount=amount,
+            params={
+                'stopPrice': exchange.price_to_precision(SYMBOL, sl_price),
+                'triggerType': 'last_price',
+                'reduceOnly': True,
+                'posSide': 'SHORT'
+            }
+        )
+        
+        # Take Profit
+        exchange.create_order(
+            symbol=SYMBOL,
+            type='limit',
+            side='buy',
+            amount=amount,
+            params={
+                'stopPrice': exchange.price_to_precision(SYMBOL, tp_price),
+                'triggerType': 'last_price',
+                'reduceOnly': True,
+                'posSide': 'SHORT'
+            }
+        )
 
-        entry_price = float(entry_price)
-        print(f"Naudojama entry kaina: {entry_price}")
-
-        # 2. Skaičiavimai
-        risk_distance = sl_price_raw - entry_price
-        tp_price = entry_price - (risk_distance * 2)
-        amount = round((MARGIN_USDT * LEVERAGE) / entry_price, 4)
-
-        # 3. SHORT atidarymas
-        print(f"Atidarau SHORT: {amount} BTC...")
-        order_open = exchange.contractPrivatePostOrderSubmit({
-            'symbol': symbol,
-            'side': 2,        # 2 = Open Short
-            'vol': amount,
-            'leverage': LEVERAGE,
-            'openType': 1,    # Isolated
-            'orderType': 2    # Market
-        })
-        print(f"SHORT atidarytas: {order_open}")
-
-        time.sleep(1.5)
-
-        # 4. STOP LOSS
-        print(f"Nustatau SL ties {sl_price_raw}")
-        exchange.contractPrivatePostPlanorderSubmit({
-            'symbol': symbol,
-            'side': 4,               # Close Short
-            'vol': amount,
-            'triggerPrice': sl_price_raw,
-            'triggerType': 1,
-            'executeCycle': 1,
-            'orderType': 2,
-            'trend': 1               # Up
-        })
-
-        # 5. TAKE PROFIT
-        print(f"Nustatau TP ties {tp_price}")
-        exchange.contractPrivatePostPlanorderSubmit({
-            'symbol': symbol,
-            'side': 4,
-            'vol': amount,
-            'triggerPrice': tp_price,
-            'triggerType': 1,
-            'executeCycle': 1,
-            'orderType': 2,
-            'trend': 2               # Down
-        })
-
-        return {"status": "success"}, 200
+        return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
-        print("--- KRITINĖ KLAIDA ---")
-        print(traceback.format_exc())
-        return str(e), 400
+        print(f"KLAIDA: {traceback.format_exc()}")
+        return {"error": str(e)}, 400
 
 if __name__ == '__main__':
+    # Render/Railway portų palaikymas
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
