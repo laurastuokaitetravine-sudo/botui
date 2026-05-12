@@ -6,6 +6,7 @@ import time
 
 app = Flask(__name__)
 
+# --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
@@ -14,12 +15,11 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.0  # Rizikuojama suma
+MARGIN_USDT = 9.0  # Suma vienam sandoriui
 
 @app.route('/')
 def home():
     return "SHORT BOTAS VEIKIA!", 200
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -31,11 +31,11 @@ def webhook():
         print(f"JSON klaida: {e}")
         return "Invalid JSON", 400
 
-    # 2. Slaptažodis
+    # 2. Saugumo patikra
     if not data or data.get('passphrase') != MY_PASSWORD:
         return "Unauthorized", 403
 
-    # 3. Tik SHORT signalai
+    # 3. Krypties patikra (TradingView pranešime PRIVALO būti "action": "short")
     if data.get("action") != "short":
         return "Klaida: šis botas priima tik SHORT signalus", 400
 
@@ -43,39 +43,30 @@ def webhook():
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 4. Futures markPrice gavimas (TEISINGAS ENDPOINTAS)
+        # 4. Gauname Mark Price (tiksliausia kaina Futures rinkoje)
         ticker = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
-
         if 'markPrice' not in ticker:
-            print(f"Ticker info be markPrice: {ticker}")
-            return "Klaida: negauta markPrice iš MEXC futures", 400
+            return "Klaida: negauta kaina iš MEXC", 400
 
         entry_price = float(ticker['markPrice'])
-        print(f"Naudojama entry kaina (markPrice): {entry_price}")
+        print(f"Naudojama entry kaina: {entry_price}")
 
-        if entry_price <= 0:
-            return "Klaida: negauta teisinga BTC kaina", 400
-
-        # 5. SL logika – SHORT → SL turi būti aukščiau kainos
+        # 5. SHORT logika: SL privalo būti aukščiau kainos
         if sl_price_raw <= entry_price:
-            return "Klaida: SL turi būti aukščiau dabartinės kainos SHORT pozicijai!", 400
+            return f"Klaida: SL ({sl_price_raw}) turi buti virs kainos ({entry_price})!", 400
 
         # 6. TP skaičiavimas (RR 1:2)
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
-        # 7. Leverage nustatymas
+        # 7. Sverto nustatymas
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
-        except Exception as e:
-            print(f"Leverage klaida (tęsiam be jos): {e}")
+        except:
+            pass
 
-        # 8. Kiekio skaičiavimas
+        # 8. Kiekių ir tikslumo nustatymai
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
-        if amount <= 0:
-            print(f"Blogas amount: {amount}, entry_price: {entry_price}")
-            return "Klaida: amount <= 0", 400
-
         amount_str = exchange.amount_to_precision(symbol, amount)
         sl_price_str = exchange.price_to_precision(symbol, sl_price_raw)
         tp_price_str = exchange.price_to_precision(symbol, tp_price)
@@ -84,65 +75,50 @@ def webhook():
         sl_f = float(sl_price_str)
         tp_f = float(tp_price_str)
 
-        print(f"Skaičiuojamas amount: {amount_f}, SL: {sl_f}, TP: {tp_f}")
-
-        # 9. SHORT atidarymas – MARKET SELL
-        print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
+        # 9. SHORT ATIDARYMAS (MARKET SELL)
+        print(f"Atidarau SHORT: {amount_f} BTC...")
+        # Svarbu: perduodame entry_price, kad MEXC negrąžintų Mandatory Parameter klaidos
         order_open = exchange.create_order(
-            symbol,
-            'market',
-            'sell',
-            amount_f,
-            None,
+            symbol, 'market', 'sell', amount_f, entry_price, 
             {
-                'openType': 1,
-                'positionMode': 2
+                'openType': 1,      # Isolated
+                'positionMode': 2   # Short rėžimas
             }
         )
-        print(f"SHORT atidarytas: {order_open}")
+        print(f"Pozicija atidaryta: {order_open.get('id', 'OK')}")
 
-        time.sleep(1.5)
+        time.sleep(2) # Palaukiame, kol birža užfiksuos poziciją
 
-        # 10. STOP LOSS – MEXC trigger order (SHORT → BUY kai kaina KYLA)
-        print(f"Nustatau SL (trigger): {sl_price_str}")
-        sl_order = exchange.create_order(
-            symbol,
-            'trigger',
-            'buy',
-            amount_f,
-            None,
+        # 10. STOP LOSS (Trigger kai kaina kyla)
+        print(f"Nustatau SL ties {sl_f}")
+        exchange.create_order(
+            symbol, 'trigger', 'buy', amount_f, None,
             {
                 'triggerPrice': sl_f,
-                'triggerDirection': 1,  # 1 = trigger when price rises
+                'triggerDirection': 1, # Trigger kai kaina kyla (tiksliai SHORT'ui)
                 'reduceOnly': True,
                 'positionMode': 2
             }
         )
-        print(f"SL orderis: {sl_order}")
 
-        # 11. TAKE PROFIT – MEXC trigger limit (SHORT → BUY kai kaina KRENTA)
-        print(f"Nustatau TP (trigger limit): {tp_price_str}")
-        tp_order = exchange.create_order(
-            symbol,
-            'trigger',
-            'buy',
-            amount_f,
-            tp_f,
+        # 11. TAKE PROFIT (Trigger kai kaina krenta)
+        print(f"Nustatau TP ties {tp_f}")
+        exchange.create_order(
+            symbol, 'trigger', 'buy', amount_f, tp_f,
             {
                 'triggerPrice': tp_f,
-                'triggerDirection': 2,  # 2 = trigger when price falls
+                'triggerDirection': 2, # Trigger kai kaina krenta
                 'reduceOnly': True,
                 'positionMode': 2
             }
         )
-        print(f"TP orderis: {tp_order}")
 
-        return {"status": "success"}, 200
+        return {"status": "success", "message": "SHORT pozicija, SL ir TP sukurti"}, 200
 
     except Exception as e:
-        print(f"Klaida: {str(e)}")
-        return str(e), 400
-
+        error_msg = f"Klaida vykdant operacijas: {str(e)}"
+        print(error_msg)
+        return error_msg, 400
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
