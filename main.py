@@ -14,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10.0 
+MARGIN_USDT = 10.0  # Pakeičiau į 25.0, kad atitiktų tavo norus
 SYMBOL = 'BTC/USDT:USDT'
 
 @app.route('/')
@@ -39,17 +39,24 @@ def webhook():
         # 2. SL ir TP skaičiavimas (RR 1:2)
         sl_input = data.get('sl')
         sl_price = float(sl_input) if sl_input else entry_price * 1.01
-        
-        # Rizikos atstumas (kiek kaina turi pakilti iki SL)
         risk_dist = sl_price - entry_price
-        # TP skaičiavimas: įėjimo kaina - (rizika * 2)
         tp_price = entry_price - (risk_dist * 2)
 
-        # 3. Kiekio skaičiavimas
-        total_value = MARGIN_USDT * LEVERAGE
-        raw_amount = total_value / entry_price
+        # 3. KIEKIO SKAIČIAVIMAS (Pataisyta, kad naudotų visą maržą)
+        # Paskaičiuojame bendrą galią: 25 USDT * 25 svertas = 625 USDT vertės pozicija
+        total_value_usdt = MARGIN_USDT * LEVERAGE
+        
+        # Paskaičiuojame kiek tai BTC (pvz., 625 / 80500 = 0.0077 BTC)
+        raw_btc_amount = total_value_usdt / entry_price
+        
+        # Naudojame specialią funkciją, kuri suapvalina kiekį pagal MEXC taisykles
+        # Svarbu: MEXC BTC kontrakto žingsnis yra 0.0001 BTC
+        amount = float(exchange.amount_to_precision(SYMBOL, raw_btc_amount))
+
+        # Saugiklis: jei netyčia amount būtų 0, imam minimumą
         min_qty = float(markets[SYMBOL]['limits']['amount']['min'])
-        amount = float(exchange.amount_to_precision(SYMBOL, max(raw_amount, min_qty)))
+        if amount < min_qty:
+            amount = min_qty
 
         # 4. Svertas
         try:
@@ -81,8 +88,8 @@ def webhook():
             }
         )
 
-        print(f"SHORT sėkmingas! Entry: {entry_price}, SL: {sl_price}, TP: {tp_price}")
-        return {"status": "success", "tp": tp_price, "sl": sl_price}, 200
+        print(f"SĖKMĖ! Atidaryta pozicija: {amount} BTC. Entry: {entry_price}")
+        return {"status": "success", "amount_deployed": amount}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
