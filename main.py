@@ -14,29 +14,73 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.5 # Sumažinau iki 9.5, kad 100% užtektų mokesčiams
+MARGIN_USDT = 9.5  # suma pozicijai
+
+# --- UNIVERSALUS JSON PRIĖMIMAS ---
+def extract_json():
+    """
+    Priima JSON iš:
+    - TradingView (raw JSON)
+    - PowerShell (raw JSON)
+    - HTML formos (form-data)
+    - text/plain formos
+    """
+
+    # 1. Tikras JSON (TradingView, Postman)
+    if request.is_json:
+        try:
+            return request.get_json()
+        except:
+            pass
+
+    # 2. Raw tekstas (HTML forma su text/plain)
+    raw = request.get_data(as_text=True).strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            return json.loads(raw)
+        except:
+            pass
+
+    # 3. Form-data (HTML forma su textarea)
+    if len(request.form) > 0:
+        form_value = next(iter(request.form.values()))
+        form_value = form_value.strip()
+        if form_value.startswith("{") and form_value.endswith("}"):
+            try:
+                return json.loads(form_value)
+            except:
+                pass
+
+    return None
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    try:
-        raw_data = request.get_data(as_text=True)
-        data = json.loads(raw_data)
-        print(f"Gautas signalas: {data}")
-    except Exception as e:
+    # --- JSON PARSINIMAS ---
+    data = extract_json()
+    if data is None:
+        print("❌ JSON klaida – negavau tinkamo formato")
         return "Invalid JSON", 400
 
-    if not data or data.get('passphrase') != MY_PASSWORD:
+    print(f"📩 Gautas signalas: {data}")
+
+    # --- PASSCODE ---
+    if data.get('passphrase') != MY_PASSWORD:
+        print("❌ Neteisingas slaptažodis")
         return "Unauthorized", 403
 
     try:
         symbol = 'BTC/USDT'
-        action = data.get('action') 
+        action = data.get('action')
         sl_price = float(data.get('sl'))
 
+        # --- KAINA ---
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
-        
+
+        # --- RIZIKOS SKAIČIAVIMAS ---
         risk_distance = abs(entry_price - sl_price)
+
         if action == 'short':
             tp_price = entry_price - (risk_distance * 2)
             side, close_side, pos_mode = 'sell', 'buy', 2
@@ -44,41 +88,44 @@ def webhook():
             tp_price = entry_price + (risk_distance * 2)
             side, close_side, pos_mode = 'buy', 'sell', 1
 
-        # 1. Nustatom svertą (Isolated)
+        # --- LEVERAGE ---
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': pos_mode})
-        except:
-            pass
+        except Exception as e:
+            print("⚠ Nepavyko nustatyti sverto:", e)
 
-        # 2. Skaičiuojame kiekį
+        # --- KIEKIS ---
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount = float(exchange.amount_to_precision(symbol, amount))
-        
-        # 3. ATIDAROME POZICIJĄ (SVARBU: pridedame openType ir positionMode)
-        print(f"Atidarau {action}...")
+
+        print(f"📌 Atidarau {action.upper()} | amount={amount} | entry={entry_price}")
+
+        # --- ATIDARYMAS ---
         exchange.create_order(symbol, 'market', side, amount, params={
             'positionMode': pos_mode,
-            'openType': 1 # 1 reiškia OPEN (atidaryti naują)
+            'openType': 1
         })
 
-        # 4. STOP LOSS
+        # --- STOP LOSS ---
         exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
-            'stopPrice': sl_price, 
+            'stopPrice': sl_price,
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
-        # 5. TAKE PROFIT
+        # --- TAKE PROFIT ---
         exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
+        print("✅ Pozicija atidaryta sėkmingai")
         return f"Sekme! {action} atidarytas.", 200
 
     except Exception as e:
-        print(f"Klaida: {str(e)}")
+        print(f"❌ Klaida vykdant orderius: {str(e)}")
         return str(e), 400
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
