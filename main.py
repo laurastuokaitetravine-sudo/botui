@@ -7,6 +7,7 @@ import traceback
 
 app = Flask(__name__)
 
+# --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92a7d9d0de77ea',
@@ -38,11 +39,15 @@ def webhook():
         symbol = 'BTC_USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 1. Gauti fairPrice iš futures API
+        # 1. Gauti kainą iš FUTURES API
         ticker = exchange.contractPublicGetTicker({'symbol': symbol})
-        entry_price = float(ticker['fairPrice'])
 
-        print(f"Entry kaina: {entry_price}")
+        # Tavo CCXT versija turi tik lastPrice
+        if 'lastPrice' not in ticker:
+            raise Exception("MEXC ticker neturi lastPrice — CCXT versija per sena")
+
+        entry_price = float(ticker['lastPrice'])
+        print(f"Entry kaina (lastPrice): {entry_price}")
 
         # 2. Skaičiavimai
         risk_distance = sl_price_raw - entry_price
