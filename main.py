@@ -24,7 +24,6 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Pataisytas duomenų gavimas (force=True padeda, jei headeriai netikslūs)
         data = request.get_json(force=True)
         print(f"Gautas signalas: {data}")
     except:
@@ -35,68 +34,64 @@ def webhook():
 
     try:
         symbol = 'BTC/USDT'
-        sl_price = float(data.get('sl'))
+        sl_price_raw = float(data.get('sl'))
 
-        # Gauname dabartinę rinkos kainą
+        # 0. Gauname dabartinę kainą
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         
-        # Saugiklis: Short pozicijai SL turi būti AUKŠČIAU kainos
-        if sl_price <= entry_price:
-            error_msg = f"KLAIDA: SL ({sl_price}) turi buti AUKSCIAU nei BTC kaina ({entry_price})!"
-            print(error_msg)
-            return error_msg, 400
+        if sl_price_raw <= entry_price:
+            return f"Klaida: SL ({sl_price_raw}) turi buti AUKSCIAU kainos ({entry_price})!", 400
 
-        # Skaičiuojame TP (2:1 rizikos santykis)
-        risk_distance = sl_price - entry_price
+        # Skaičiuojame TP (2:1 santykis)
+        risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
-        # 1. Nustatom svertą (PositionType 2 = Short)
+        # 1. Sverto nustatymas
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
         except:
             pass
 
-        # 2. Skaičiuojame kiekius ir apvaliname pagal biržos tikslumą
+        # 2. Tikslumo nustatymai
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount_str = exchange.amount_to_precision(symbol, amount)
         tp_price_str = exchange.price_to_precision(symbol, tp_price)
-        sl_price_str = exchange.price_to_precision(symbol, sl_price)
+        sl_price_str = exchange.price_to_precision(symbol, sl_price_raw)
         
         # 3. ATIDAROME SHORT POZICIJĄ
-        # Pridedame entry_price, kad išvengtume Mandatory parameter 'price' klaidos
-        print(f"Vykdomas SHORT užsakymas: {amount_str} BTC...")
+        print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
+        # MEXC reikalauja entry_price net market užsakymui, kad išvengtume 700004 klaidos
         exchange.create_order(symbol, 'market', 'sell', amount_str, entry_price, {
-            'openType': 1,      # Isolated
-            'positionMode': 2   # Short
-        })
-        
-        time.sleep(1.5) # Šiek tiek palaukiame, kol birža užregistruos poziciją
-
-        # 4. STOP LOSS (uždarymas su 'buy')
-        # Svarbu: pridėtas papildomas 'price' parametras į params, kad MEXC neatmestų
-        print(f"Nustatau SL ties {sl_price_str}")
-        exchange.create_order(symbol, 'stop_market', 'buy', amount_str, None, {
-            'stopPrice': sl_price_str, 
-            'price': sl_price_str, # <--- Čia ištaisoma 700004 klaida SL užsakymui
-            'reduceOnly': True,
+            'openType': 1,
             'positionMode': 2
         })
+        
+        time.sleep(1.5) 
 
-        # 5. TAKE PROFIT (uždarymas su 'buy' limit)
+        # 4. STOP LOSS (SVARBU: čia perduodame sl_price_raw du kartus)
+        print(f"Nustatau SL ties {sl_price_str}")
+        exchange.create_order(symbol, 'stop_market', 'buy', amount_str, sl_price_raw, {
+            'stopPrice': sl_price_str, 
+            'price': sl_price_str,      # Dubliuojame kainą dėl MEXC API specifikos
+            'reduceOnly': True,
+            'positionMode': 2,
+            'triggerType': 1            # Naudoti Last Price kaip trigerį
+        })
+
+        # 5. TAKE PROFIT
         print(f"Nustatau TP ties {tp_price_str}")
         exchange.create_order(symbol, 'limit', 'buy', amount_str, tp_price_str, {
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        return {"status": "success", "message": "Short pozicija su SL ir TP atidaryta"}, 200
+        return {"status": "success", "msg": "Viskas suveike"}, 200
 
     except Exception as e:
         print(f"Klaida: {str(e)}")
         return str(e), 400
 
 if __name__ == '__main__':
-    # Render automatiškai naudoja PORT aplinkos kintamąjį
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
