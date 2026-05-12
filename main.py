@@ -6,7 +6,6 @@ import time
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
@@ -15,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.5 
+MARGIN_USDT = 9.0 # Šiek tiek sumažinau saugumui
 
 @app.route('/')
 def home():
@@ -36,55 +35,50 @@ def webhook():
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 0. Gauname dabartinę kainą
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         
         if sl_price_raw <= entry_price:
-            return f"Klaida: SL ({sl_price_raw}) turi buti AUKSCIAU kainos ({entry_price})!", 400
+            return f"Klaida: SL turi buti auksciau kainos!", 400
 
-        # Skaičiuojame TP (2:1 santykis)
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
 
-        # 1. Sverto nustatymas (PositionMode 2 = Short)
         try:
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
-        except:
-            pass
+        except: pass
 
-        # 2. Tikslumo nustatymai (MEXC reikalauja specifinio apvalinimo)
+        # Skaičiuojame kiekį
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount_str = exchange.amount_to_precision(symbol, amount)
-        tp_price_str = exchange.price_to_precision(symbol, tp_price)
         sl_price_str = exchange.price_to_precision(symbol, sl_price_raw)
+        tp_price_str = exchange.price_to_precision(symbol, tp_price)
         
-        # 3. ATIDAROME SHORT POZICIJĄ
-        print(f"Atidarau SHORT užsakymą: {amount_str} BTC...")
-        # Naudojame float() konvertavimą, kad išvengtume "invalid type" klaidų
-        exchange.create_order(symbol, 'market', 'sell', float(amount_str), float(entry_price), {
+        # 3. ATIDARYMAS
+        print(f"Atidarau SHORT: {amount_str} BTC...")
+        exchange.create_order(symbol, 'market', 'sell', float(amount_str), None, {
             'openType': 1,
             'positionMode': 2
         })
         
         time.sleep(1.5) 
 
-        # 4. STOP LOSS (uždarymas su 'buy')
-        print(f"Nustatau SL ties {sl_price_str}")
-        exchange.create_order(symbol, 'stop_market', 'buy', float(amount_str), float(sl_price_str), {
-            'stopPrice': float(sl_price_str), 
+        # 4. STOP LOSS
+        print(f"SL: {sl_price_str}")
+        exchange.create_order(symbol, 'stop_market', 'buy', float(amount_str), None, {
+            'stopPrice': float(sl_price_str),
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        # 5. TAKE PROFIT (uždarymas su 'buy' limit)
-        print(f"Nustatau TP ties {tp_price_str}")
+        # 5. TAKE PROFIT
+        print(f"TP: {tp_price_str}")
         exchange.create_order(symbol, 'limit', 'buy', float(amount_str), float(tp_price_str), {
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        return {"status": "success", "msg": "Pozicija, SL ir TP sukurti sėkmingai"}, 200
+        return {"status": "success"}, 200
 
     except Exception as e:
         print(f"Klaida: {str(e)}")
