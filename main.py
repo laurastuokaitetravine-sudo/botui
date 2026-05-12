@@ -2,6 +2,7 @@ import os
 import json
 from flask import Flask, request
 import ccxt
+import time
 
 app = Flask(__name__)
 
@@ -14,115 +15,86 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.5  # suma pozicijai
-
-
-# --- UNIVERSALUS JSON PRIĖMIMAS + DEBUG ---
-def extract_json():
-    # DEBUG – matysime, ką naršyklė iš tikro siunčia
-    print("RAW BODY:", request.get_data(as_text=True))
-    print("FORM DATA:", request.form)
-
-    # 1. Tikras JSON (TradingView, Postman)
-    if request.is_json:
-        try:
-            return request.get_json()
-        except:
-            pass
-
-    # 2. Raw tekstas (HTML forma su text/plain)
-    raw = request.get_data(as_text=True).strip()
-    if raw.startswith("{") and raw.endswith("}"):
-        try:
-            return json.loads(raw)
-        except:
-            pass
-
-    # 3. Form-data (HTML forma su textarea)
-    if len(request.form) > 0:
-        form_value = next(iter(request.form.values()))
-        form_value = form_value.strip()
-        if form_value.startswith("{") and form_value.endswith("}"):
-            try:
-                return json.loads(form_value)
-            except:
-                pass
-
-    return None
-
+MARGIN_USDT = 9.5 
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # --- JSON PARSINIMAS ---
-    data = extract_json()
-    if data is None:
-        print("❌ JSON klaida – negavau tinkamo formato")
+    try:
+        data = request.get_json()
+        print(f"Gautas signalas: {data}")
+    except Exception as e:
         return "Invalid JSON", 400
 
-    print(f"📩 Gautas signalas: {data}")
-
-    # --- PASSCODE ---
-    if data.get('passphrase') != MY_PASSWORD:
-        print("❌ Neteisingas slaptažodis")
+    if not data or data.get('passphrase') != MY_PASSWORD:
         return "Unauthorized", 403
 
     try:
         symbol = 'BTC/USDT'
-        action = data.get('action')
+        action = data.get('action') # 'buy' arba 'short'
         sl_price = float(data.get('sl'))
 
-        # --- KAINA ---
+        # Gauname dabartinę kainą
         ticker = exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
-
-        # --- RIZIKOS SKAIČIAVIMAS ---
+        
         risk_distance = abs(entry_price - sl_price)
-
-        if action == 'short':
+        
+        # Nustatymai pagal kryptį
+        if action == 'short' or action == 'sell':
             tp_price = entry_price - (risk_distance * 2)
-            side, close_side, pos_mode = 'sell', 'buy', 2
+            side = 'sell'
+            close_side = 'buy'
+            pos_mode = 2  # Short pozicija
         else:
             tp_price = entry_price + (risk_distance * 2)
-            side, close_side, pos_mode = 'buy', 'sell', 1
+            side = 'buy'
+            close_side = 'sell'
+            pos_mode = 1  # Long pozicija
 
-        # --- LEVERAGE ---
+        # 1. Nustatom svertą (Isolated)
         try:
+            # openType: 1 - Isolated, 2 - Cross
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': pos_mode})
         except Exception as e:
-            print("⚠ Nepavyko nustatyti sverto:", e)
+            print(f"Sverto nustatymo klaida (galbūt jau nustatytas): {e}")
 
-        # --- KIEKIS ---
+        # 2. Skaičiuojame kiekį
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
-        amount = float(exchange.amount_to_precision(symbol, amount))
-
-        print(f"📌 Atidarau {action.upper()} | amount={amount} | entry={entry_price}")
-
-        # --- ATIDARYMAS ---
-        exchange.create_order(symbol, 'market', side, amount, params={
-            'positionMode': pos_mode,
-            'openType': 1
+        amount_str = exchange.amount_to_precision(symbol, amount)
+        tp_price_str = exchange.price_to_precision(symbol, tp_price)
+        sl_price_str = exchange.price_to_precision(symbol, sl_price)
+        
+        # 3. ATIDAROME POZICIJĄ
+        print(f"Vykdomas {side} užsakymas: {amount_str} BTC...")
+        order = exchange.create_order(symbol, 'market', side, amount_str, params={
+            'openType': 1, # Open
+            'positionMode': pos_mode
         })
+        
+        # Šiek tiek palaukiame, kol birža užregistruos poziciją prieš siunčiant SL/TP
+        time.sleep(0.5)
 
-        # --- STOP LOSS ---
-        exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
-            'stopPrice': sl_price,
+        # 4. STOP LOSS (MEXC naudoja specifinius parametrus stop_market)
+        print(f"Nustatomas SL: {sl_price_str}")
+        exchange.create_order(symbol, 'stop_market', close_side, amount_str, None, {
+            'stopPrice': sl_price_str, 
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
-        # --- TAKE PROFIT ---
-        exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
+        # 5. TAKE PROFIT
+        print(f"Nustatomas TP: {tp_price_str}")
+        exchange.create_order(symbol, 'limit', close_side, amount_str, tp_price_str, {
             'reduceOnly': True,
             'positionMode': pos_mode
         })
 
-        print("✅ Pozicija atidaryta sėkmingai")
-        return f"Sekme! {action} atidarytas.", 200
+        return {"status": "success", "message": f"{action} pozicija atidaryta"}, 200
 
     except Exception as e:
-        print(f"❌ Klaida vykdant orderius: {str(e)}")
-        return str(e), 400
-
+        error_msg = f"Klaida vykdant sandorį: {str(e)}"
+        print(error_msg)
+        return error_msg, 400
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
