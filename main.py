@@ -11,24 +11,25 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
     'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
-    'options': {'defaultType': 'swap'}
+    'options': {
+        'defaultType': 'swap'  # Nurodome naudoti Futures (Swap) rinką
+    }
 })
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 9.0 
+MARGIN_USDT = 9.0  # Suma, skirta vienam sandoriui
 
 @app.route('/')
 def home():
     return "BOTAS GYVAS! Paruošta SHORT signalams.", 200
 
-# Patikros nuoroda: https://onrender.com
 @app.route('/test')
 def test_connection():
     try:
         response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
         price = response['data']['fairPrice']
-        return f"Ryšys su MEXC geras. BTC kaina: {price}", 200
+        return f"Ryšys su MEXC Futures geras. BTC kaina: {price}", 200
     except Exception as e:
         return f"MEXC ryšio klaida: {str(e)}", 500
 
@@ -53,7 +54,8 @@ def webhook():
         return "Tik SHORT signalai priimami", 400
 
     try:
-        symbol = 'BTC/USDT'
+        # SVARBU: Simbolis su ':USDT' galūne priverčia ccxt naudoti Futures API
+        symbol = 'BTC/USDT:USDT'
         sl_price_raw = float(data.get('sl'))
 
         # 3. KAINOS GAVIMAS
@@ -94,7 +96,7 @@ def webhook():
                 'positionMode': 2   # Short
             }
         )
-        print(f"Sėkmingai atidaryta: {order_open.get('id', 'OK')}")
+        print(f"Sėkmingai atidaryta ID: {order_open.get('id', 'OK')}")
         
         time.sleep(2)
 
@@ -132,7 +134,6 @@ def webhook():
 
     except Exception as e:
         print("--- KRITINĖ KLAIDA ---")
-        # Išsamus klaidos išvedimas į logus
         print(traceback.format_exc())
         return str(e), 400
 
