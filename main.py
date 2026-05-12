@@ -5,10 +5,10 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
-    'apiKey': os.getenv('mx0vgleJMChBkcG2iW'),
-    'secret': os.getenv('f9b202a9d2c94003832752f473943175'),
+    'apiKey': os.getenv('MEXC_API_KEY'),
+    'secret': os.getenv('MEXC_API_SECRET'),
     'options': {'defaultType': 'swap'}
 })
 
