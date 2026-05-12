@@ -20,9 +20,9 @@ MARGIN_USDT = 9.0
 
 @app.route('/')
 def home():
-    return "BOTAS GYVAS! Serveris paruoštas SHORT signalams.", 200
+    return "BOTAS GYVAS! Paruošta SHORT signalams.", 200
 
-# Patikros maršrutas: https://onrender.com
+# Patikros nuoroda: https://onrender.com
 @app.route('/test')
 def test_connection():
     try:
@@ -56,16 +56,13 @@ def webhook():
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 3. KAINOS GAVIMAS (fairPrice)
+        # 3. KAINOS GAVIMAS
         response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
-        if 'data' not in response or 'fairPrice' not in response['data']:
-            return "MEXC API klaida gaunant kaina", 400
-
         entry_price = float(response['data']['fairPrice'])
         print(f"Entry kaina: {entry_price}")
 
         if sl_price_raw <= entry_price:
-            return f"SL ({sl_price_raw}) turi buti virs kainos ({entry_price})!", 400
+            return f"Klaida: SL turi buti virs kainos!", 400
 
         # 4. KIEKIAI IR APVALINIMAS
         risk_distance = sl_price_raw - entry_price
@@ -76,8 +73,7 @@ def webhook():
             exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
         except: pass
 
-        amount = (MARGIN_USDT * LEVERAGE) / entry_price
-        amount_str = exchange.amount_to_precision(symbol, amount)
+        amount_str = exchange.amount_to_precision(symbol, (MARGIN_USDT * LEVERAGE) / entry_price)
         sl_str = exchange.price_to_precision(symbol, sl_price_raw)
         tp_str = exchange.price_to_precision(symbol, tp_price)
 
@@ -87,38 +83,57 @@ def webhook():
 
         # 5. ATIDARYMAS (MARKET SELL)
         print(f"Vykdomas SHORT atidarymas: {amount_f} BTC...")
-        # Market užsakymui MEXC per CCXT geriausia naudoti None kainą
-        exchange.create_order(symbol, 'market', 'sell', amount_f, None, {
-            'openType': 1,      # Isolated
-            'positionMode': 2   # Short (Hedge Mode)
-        })
+        order_open = exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='sell',
+            amount=amount_f,
+            price=None,
+            params={
+                'openType': 1,      # Isolated
+                'positionMode': 2   # Short
+            }
+        )
+        print(f"Sėkmingai atidaryta: {order_open.get('id', 'OK')}")
         
-        time.sleep(2) # Laukiam, kol birža „suvirškins“ poziciją
+        time.sleep(2)
 
-        # 6. STOP LOSS (Trigger kai kaina kyla)
-        print(f"Nustatomas SL: {sl_f}")
-        exchange.create_order(symbol, 'trigger', 'buy', amount_f, None, {
-            'triggerPrice': sl_f,
-            'triggerDirection': 1, # Kaina kyla
-            'reduceOnly': True,
-            'positionMode': 2
-        })
+        # 6. STOP LOSS (STOP MARKET)
+        print(f"Nustatau SL: {sl_f}")
+        exchange.create_order(
+            symbol=symbol,
+            type='stop_market',
+            side='buy',
+            amount=amount_f,
+            price=None,
+            params={
+                'stopPrice': sl_f,
+                'reduceOnly': True,
+                'positionMode': 2
+            }
+        )
 
-        # 7. TAKE PROFIT (Trigger kai kaina krenta)
-        print(f"Nustatomas TP: {tp_f}")
-        exchange.create_order(symbol, 'trigger', 'buy', amount_f, tp_f, {
-            'triggerPrice': tp_f,
-            'triggerDirection': 2, # Kaina krenta
-            'reduceOnly': True,
-            'positionMode': 2
-        })
+        # 7. TAKE PROFIT (LIMIT)
+        print(f"Nustatau TP: {tp_f}")
+        exchange.create_order(
+            symbol=symbol,
+            type='limit',
+            side='buy',
+            amount=amount_f,
+            price=tp_f,
+            params={
+                'reduceOnly': True,
+                'positionMode': 2
+            }
+        )
 
-        print("SĖKMĖ: Sandoris ir apsaugos nustatytos!")
+        print("SĖKMĖ: Visi užsakymai sukurti!")
         return {"status": "success"}, 200
 
     except Exception as e:
         print("--- KRITINĖ KLAIDA ---")
-        traceback.print_exc() # Parodys tikslią eilutę loguose
+        # Išsamus klaidos išvedimas į logus
+        print(traceback.format_exc())
         return str(e), 400
 
 if __name__ == '__main__':
