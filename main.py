@@ -43,8 +43,8 @@ def webhook():
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 4. Futures markPrice gavimas
-        ticker = exchange.fapiPublicGetTicker({'symbol': 'BTC_USDT'})
+        # 4. Futures markPrice gavimas (TEISINGAS ENDPOINTAS)
+        ticker = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
 
         if 'markPrice' not in ticker:
             print(f"Ticker info be markPrice: {ticker}")
