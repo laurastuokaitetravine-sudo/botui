@@ -42,20 +42,26 @@ def webhook():
         raw_amount = total_value / entry_price
         min_qty = float(market['limits']['amount']['min'])
         
+        # Imam didesnį iš skaičiuoto arba minimalaus
         final_qty = max(raw_amount, min_qty)
         amount = float(exchange.amount_to_precision(SYMBOL, final_qty))
 
-        # 3. SHORT orderis su teisingais parametrais
+        # 3. Svertas (Isolated režimas)
+        try:
+            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
+        except:
+            pass
+
+        # 4. Atidarome SHORT (Sutvarkyta pagal paskutinę klaidą)
         order = exchange.create_order(
             symbol=SYMBOL,
             type='market',
             side='sell',
             amount=amount,
             params={
-                'marginMode': 'isolated',   # ← būtina
-                'leverage': int(LEVERAGE),  # ← būtina
                 'posSide': 'SHORT',
-                'openType': 1
+                'openType': 1,
+                'leverage': int(LEVERAGE) # Čia buvo pagrindinė klaida
             }
         )
 
