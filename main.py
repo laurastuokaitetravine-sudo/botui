@@ -1,6 +1,6 @@
 import os
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import ccxt
 import time
 import traceback
@@ -10,7 +10,7 @@ app = Flask(__name__)
 # --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': 'mx0vglmDs15A34AFNE',
-    'secret': '7f79ccbe92ac42af94e897d9d0de77ea', # Būtinai patikrinkite, ar čia pilnas Secret Key!
+    'secret': '7f79ccbe92ac42af94e897d9d0de77ea',
     'options': {'defaultType': 'swap'}
 })
 
@@ -20,96 +20,105 @@ MARGIN_USDT = 9.0
 
 @app.route('/')
 def home():
-    return "BOTAS GYVAS! Serveris laukia signalu.", 200
+    return "BOTAS GYVAS! Serveris paruoštas SHORT signalams.", 200
 
-# Naujas maršrutas greitam patikrinimui per naršyklę
+# Patikros maršrutas: https://onrender.com
 @app.route('/test')
 def test_connection():
     try:
-        ticker = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
-        kaina = ticker['data']['fairPrice']
-        return f"Sėkmė! Ryšys su MEXC yra. BTC kaina dabar: {kaina}", 200
+        response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
+        price = response['data']['fairPrice']
+        return f"Ryšys su MEXC geras. BTC kaina: {price}", 200
     except Exception as e:
-        return f"Klaida jungiantis prie MEXC: {str(e)}", 500
+        return f"MEXC ryšio klaida: {str(e)}", 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. Priverstinis teksto gavimas (išvengia JSON formatavimo klaidų)
+    # 1. SAUGUS DUOMENŲ GAVIMAS
     raw_body = request.get_data(as_text=True)
-    print(f"--- GAUTAS NAUJAS SIGNALAS ---")
+    print(f"--- GAUTAS SIGNALAS ---")
     print(f"Raw data: '{raw_body}'")
 
     try:
         data = json.loads(raw_body)
     except Exception as e:
-        print(f"KLAIDA: Nepavyko perskaityti JSON. {str(e)}")
-        return f"JSON klaida: {str(e)}", 400
+        print(f"JSON klaida: {str(e)}")
+        return "Invalid JSON format", 400
 
-    # 2. Slaptažodžio ir krypties patikra
+    # 2. PATIKROS
     if data.get('passphrase') != MY_PASSWORD:
-        print(f"KLAIDA: Neteisingas slaptazodis. Gauta: {data.get('passphrase')}")
         return "Unauthorized", 403
 
     if data.get('action') != 'short':
-        print("KLAIDA: Gautas ne SHORT signalas.")
-        return "Tik SHORT palaikomas", 400
+        return "Tik SHORT signalai priimami", 400
 
     try:
         symbol = 'BTC/USDT'
         sl_price_raw = float(data.get('sl'))
 
-        # 3. Gauname kaina
+        # 3. KAINOS GAVIMAS (fairPrice)
         response = exchange.contractPublicGetTicker({'symbol': 'BTC_USDT'})
+        if 'data' not in response or 'fairPrice' not in response['data']:
+            return "MEXC API klaida gaunant kaina", 400
+
         entry_price = float(response['data']['fairPrice'])
         print(f"Entry kaina: {entry_price}")
 
         if sl_price_raw <= entry_price:
-            return f"Klaida: SL ({sl_price_raw}) turi buti virs kainos!", 400
+            return f"SL ({sl_price_raw}) turi buti virs kainos ({entry_price})!", 400
 
-        # 4. Kiekiai
+        # 4. KIEKIAI IR APVALINIMAS
         risk_distance = sl_price_raw - entry_price
         tp_price = entry_price - (risk_distance * 2)
+
+        # Nustatom svertą
+        try:
+            exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': 2})
+        except: pass
 
         amount = (MARGIN_USDT * LEVERAGE) / entry_price
         amount_str = exchange.amount_to_precision(symbol, amount)
         sl_str = exchange.price_to_precision(symbol, sl_price_raw)
         tp_str = exchange.price_to_precision(symbol, tp_price)
 
-        # 5. ATIDARYMAS
-        print(f"Vykdomas SHORT: {amount_str} BTC...")
-        exchange.create_order(symbol, 'market', 'sell', float(amount_str), entry_price, {
-            'openType': 1,
-            'positionMode': 2
+        amount_f = float(amount_str)
+        sl_f = float(sl_str)
+        tp_f = float(tp_str)
+
+        # 5. ATIDARYMAS (MARKET SELL)
+        print(f"Vykdomas SHORT atidarymas: {amount_f} BTC...")
+        # Market užsakymui MEXC per CCXT geriausia naudoti None kainą
+        exchange.create_order(symbol, 'market', 'sell', amount_f, None, {
+            'openType': 1,      # Isolated
+            'positionMode': 2   # Short (Hedge Mode)
         })
         
-        time.sleep(2)
+        time.sleep(2) # Laukiam, kol birža „suvirškins“ poziciją
 
-        # 6. SL IR TP
-        print(f"Nustatomas SL ({sl_str}) ir TP ({tp_str})")
-        
-        # Stop Loss
-        exchange.create_order(symbol, 'trigger', 'buy', float(amount_str), None, {
-            'triggerPrice': float(sl_str),
-            'triggerDirection': 1, 
+        # 6. STOP LOSS (Trigger kai kaina kyla)
+        print(f"Nustatomas SL: {sl_f}")
+        exchange.create_order(symbol, 'trigger', 'buy', amount_f, None, {
+            'triggerPrice': sl_f,
+            'triggerDirection': 1, # Kaina kyla
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        # Take Profit
-        exchange.create_order(symbol, 'trigger', 'buy', float(amount_str), float(tp_str), {
-            'triggerPrice': float(tp_str),
-            'triggerDirection': 2, 
+        # 7. TAKE PROFIT (Trigger kai kaina krenta)
+        print(f"Nustatomas TP: {tp_f}")
+        exchange.create_order(symbol, 'trigger', 'buy', amount_f, tp_f, {
+            'triggerPrice': tp_f,
+            'triggerDirection': 2, # Kaina krenta
             'reduceOnly': True,
             'positionMode': 2
         })
 
-        print("SĖKMĖ: Sandoris sudarytas!")
+        print("SĖKMĖ: Sandoris ir apsaugos nustatytos!")
         return {"status": "success"}, 200
 
     except Exception as e:
-        # Atspausdina pilną klaidos kelią (Traceback)
         print("--- KRITINĖ KLAIDA ---")
-        traceback.print_exc()
+        traceback.print_exc() # Parodys tikslią eilutę loguose
         return str(e), 400
 
 if __name__ == '__main__':
