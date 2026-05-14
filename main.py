@@ -31,22 +31,29 @@ def webhook():
         if str(data.get('action')).lower() != 'short':
             return "Ignored", 200
 
-        # 1. Rinkos duomenys
+               # 1. Rinkos duomenys
         markets = exchange.load_markets()
         market = markets[SYMBOL]
         ticker = exchange.fetch_ticker(SYMBOL)
         entry_price = float(ticker['last'])
         
-        # 2. Kiekio skaičiavimas
-        total_value = MARGIN_USDT * LEVERAGE
-        raw_amount = total_value / entry_price
-        min_cost = float(market['limits']['cost']['min'])
-        min_qty = min_cost / entry_price
-
+        # 2. Kiekio skaičiavimas (PATAISYTAS)
+        total_value = MARGIN_USDT * LEVERAGE  # Pav. 25 * 25 = 625 USDT vertė
+        raw_btc_amount = total_value / entry_price  # Kiekis tikrais BTC vienetais
         
-        # Imam didesnį iš skaičiuoto arba minimalaus
-        final_qty = max(raw_amount, min_qty)
-        amount = float(exchange.amount_to_precision(SYMBOL, final_qty))
+        # Gauname MEXC vieno kontrakto dydį (BTC/USDT dažniausiai yra 0.0001)
+        contract_size = float(market.get('contractSize', 1.0))
+        
+        # Paverčiame BTC kiekį į kontraktų (lotų) skaičių
+        contracts_qty = raw_btc_amount / contract_size
+        
+        # Tikriname minimalų biržos leidžiamą kontraktų kiekį
+        min_contracts = float(market['limits']['amount']['min'])
+        final_contracts = max(contracts_qty, min_contracts)
+        
+        # Suapvaliname pagal MEXC reikalavimus (kontraktai dažniausiai apvalinami iki sveikų skaičių)
+        amount = float(exchange.amount_to_precision(SYMBOL, final_contracts))
+
 
         # 3. Svertas (Isolated režimas)
         try:
