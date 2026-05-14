@@ -14,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 25.0 
+MARGIN_USDT = 10.0 
 SYMBOL = 'BTC/USDT:USDT'
 
 @app.route('/')
