@@ -9,8 +9,12 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'options': {'defaultType': 'swap'}
+    'options': {
+        'defaultType': 'swap',                          # Kablelis čia yra privalomas
+        'createMarketBuyOrderRequiresPrice': False      # Perkelta į 'options' vidų
+    }
 })
+
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
