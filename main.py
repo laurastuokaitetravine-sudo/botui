@@ -1,5 +1,5 @@
 import os
-import traceback
+import json
 from flask import Flask, request
 import ccxt
 
@@ -7,94 +7,92 @@ app = Flask(__name__)
 
 # --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
-    'apiKey': os.getenv('MEXC_API_KEY'),
-    'secret': os.getenv('MEXC_API_SECRET'),
+    'apiKey': 'TAVO_ACCESS_KEY',
+    'secret': 'TAVO_SECRET_KEY',
     'options': {'defaultType': 'swap'}
 })
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10.0  # Pakeičiau į 25.0, kad atitiktų tavo norus
-SYMBOL = 'BTC/USDT:USDT'
-
-@app.route('/')
-def home():
-    return "BOTAS ONLINE", 200
+MARGIN_USDT = 10
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.json
-        if not data or data.get('passphrase') != MY_PASSWORD:
-            return "Unauthorized", 403
-        
-        if str(data.get('action')).lower() != 'short':
-            return "Ignored", 200
+        raw_data = request.get_data(as_text=True)
+        data = json.loads(raw_data)
+        print(f"Gautas signalas: {data}")
+    except Exception as e:
+        return "Invalid JSON", 400
 
-        # 1. Rinkos duomenys
-        markets = exchange.load_markets()
-        ticker = exchange.fetch_ticker(SYMBOL)
-        entry_price = float(ticker['last'])
-        
-        # 2. SL ir TP skaičiavimas (RR 1:2)
-        sl_input = data.get('sl')
-        sl_price = float(sl_input) if sl_input else entry_price * 1.01
-        risk_dist = sl_price - entry_price
-        tp_price = entry_price - (risk_dist * 2)
+    if not data or data.get('passphrase') != MY_PASSWORD:
+        return "Unauthorized", 403
 
-        # 3. KIEKIO SKAIČIAVIMAS (Pataisyta, kad naudotų visą maržą)
-        # Paskaičiuojame bendrą galią: 25 USDT * 25 svertas = 625 USDT vertės pozicija
-        total_value_usdt = MARGIN_USDT * LEVERAGE
-        
-        # Paskaičiuojame kiek tai BTC (pvz., 625 / 80500 = 0.0077 BTC)
-        raw_btc_amount = total_value_usdt / entry_price
-        
-        # Naudojame specialią funkciją, kuri suapvalina kiekį pagal MEXC taisykles
-        # Svarbu: MEXC BTC kontrakto žingsnis yra 0.0001 BTC
-        amount = float(exchange.amount_to_precision(SYMBOL, raw_btc_amount))
+    try:
+        symbol = 'BTC/USDT'
+        action = data.get('action') 
+        sl_price = float(data.get('sl'))
 
-        # Saugiklis: jei netyčia amount būtų 0, imam minimumą
-        min_qty = float(markets[SYMBOL]['limits']['amount']['min'])
-        if amount < min_qty:
-            amount = min_qty
+        ticker = exchange.fetch_ticker(symbol)
+        entry_price = ticker['last']
+        
+        # Paskaičiuojame TP (1:2 santykis)
+        risk_distance = abs(entry_price - sl_price)
+        if action == 'short':
+            tp_price = entry_price - (risk_distance * 2)
+            side, close_side, pos_mode = 'sell', 'buy', 2
+        else:
+            tp_price = entry_price + (risk_distance * 2)
+            side, close_side, pos_mode = 'buy', 'sell', 1
 
-        # 4. Svertas
+        # 1. Nustatom svertą (Isolated)
         try:
-            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
+            exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
-        # 5. Atidarome SHORT (Market)
-        order = exchange.create_order(
-            symbol=SYMBOL, type='market', side='sell', amount=amount,
-            params={'posSide': 'SHORT', 'openType': 1, 'leverage': int(LEVERAGE)}
-        )
+        # 2. PATAISYMAS: Skaičiuojame kiekį KONTRAKTAIS (MEXC reikalauja sveikojo skaičiaus, min 1)
+        # Formulė: (10 USDT * 25x svertas) / BTC kaina = BTC kiekis
+        btc_amount = (MARGIN_USDT * LEVERAGE) / entry_price
+        
+        # Paverčiame į MEXC kontraktus (suapvaliname į mažesnę pusę, kad neviršyti 10 USDT)
+        amount = int(btc_amount * 10000) / 10000  # Standartinis BTC kontraktų žingsnis
+        amount = float(exchange.amount_to_precision(symbol, amount))
+        
+        # Jei netyčia gavosi 0, priverstinai nustatome mažiausią įmanomą (1 kontraktą)
+        if amount <= 0:
+            amount = 1.0
 
-        # 6. AUTOMATINIS STOP LOSS
-        exchange.create_order(
-            symbol=SYMBOL, type='spot_market', side='buy', amount=amount,
-            params={
-                'stopPrice': exchange.price_to_precision(SYMBOL, sl_price),
-                'posSide': 'SHORT', 'reduceOnly': True, 'triggerType': 'last_price'
-            }
-        )
+        print(f"Apskaičiuotas kiekis prekybai: {amount} contracts")
 
-        # 7. AUTOMATINIS TAKE PROFIT (1:2)
-        exchange.create_order(
-            symbol=SYMBOL, type='spot_market', side='buy', amount=amount,
-            params={
-                'stopPrice': exchange.price_to_precision(SYMBOL, tp_price),
-                'posSide': 'SHORT', 'reduceOnly': True, 'triggerType': 'last_price'
-            }
-        )
+        # 3. ATIDAROME POZICIJĄ
+        print(f"Atidarau {action}...")
+        exchange.create_order(symbol, 'market', side, amount, params={
+            'positionMode': pos_mode,
+            'openType': 1  # 1 = Atidaryti naują poziciją
+        })
 
-        print(f"SĖKMĖ! Atidaryta pozicija: {amount} BTC. Entry: {entry_price}")
-        return {"status": "success", "amount_deployed": amount}, 200
+        # 4. STATOME STOP LOSS
+        exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
+            'stopPrice': sl_price, 
+            'reduceOnly': True,
+            'positionMode': pos_mode
+        })
+
+        # 5. STATOME TAKE PROFIT
+        exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
+            'reduceOnly': True,
+            'positionMode': pos_mode
+        })
+
+        msg = f"Sekme! {action} atidarytas. Kiekis: {amount}. SL: {sl_price}, TP: {tp_price}"
+        print(msg)
+        return msg, 200
 
     except Exception as e:
-        print(f"KLAIDA: {traceback.format_exc()}")
-        return {"error": str(e)}, 400
+        print(f"Klaida vykdant sandori: {str(e)}")
+        return str(e), 400
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
+    port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
