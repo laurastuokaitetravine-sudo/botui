@@ -1,98 +1,77 @@
 import os
-import json
+import traceback
 from flask import Flask, request
 import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
-    'apiKey': 'TAVO_ACCESS_KEY',
-    'secret': 'TAVO_SECRET_KEY',
+    'apiKey': os.getenv('MEXC_API_KEY'),
+    'secret': os.getenv('MEXC_API_SECRET'),
     'options': {'defaultType': 'swap'}
 })
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10
+MARGIN_USDT = 5.0 
+SYMBOL = 'BTC/USDT:USDT'
+
+@app.route('/')
+def home():
+    return "BOTAS ONLINE", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        raw_data = request.get_data(as_text=True)
-        data = json.loads(raw_data)
-        print(f"Gautas signalas: {data}")
-    except Exception as e:
-        return "Invalid JSON", 400
-
-    if not data or data.get('passphrase') != MY_PASSWORD:
-        return "Unauthorized", 403
-
-    try:
-        symbol = 'BTC/USDT'
-        action = data.get('action') 
-        sl_price = float(data.get('sl'))
-
-        ticker = exchange.fetch_ticker(symbol)
-        entry_price = ticker['last']
+        data = request.json
+        if not data or data.get('passphrase') != MY_PASSWORD:
+            return "Unauthorized", 403
         
-        # Paskaičiuojame TP (1:2 santykis)
-        risk_distance = abs(entry_price - sl_price)
-        if action == 'short':
-            tp_price = entry_price - (risk_distance * 2)
-            side, close_side, pos_mode = 'sell', 'buy', 2
-        else:
-            tp_price = entry_price + (risk_distance * 2)
-            side, close_side, pos_mode = 'buy', 'sell', 1
+        if str(data.get('action')).lower() != 'short':
+            return "Ignored", 200
 
-        # 1. Nustatom svertą (Isolated)
+        # 1. Rinkos duomenys
+        markets = exchange.load_markets()
+        market = markets[SYMBOL]
+        ticker = exchange.fetch_ticker(SYMBOL)
+        entry_price = float(ticker['last'])
+        
+        # 2. Kiekio skaičiavimas
+        total_value = MARGIN_USDT * LEVERAGE
+        raw_amount = total_value / entry_price
+        min_qty = float(market['limits']['amount']['min'])
+        
+        # Imam didesnį iš skaičiuoto arba minimalaus
+        final_qty = max(raw_amount, min_qty)
+        amount = float(exchange.amount_to_precision(SYMBOL, final_qty))
+
+        # 3. Svertas (Isolated režimas)
         try:
-            exchange.set_leverage(LEVERAGE, symbol, params={'openType': 1, 'positionType': pos_mode})
+            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
         except:
             pass
 
-        # 2. PATAISYMAS: Skaičiuojame kiekį KONTRAKTAIS (MEXC reikalauja sveikojo skaičiaus, min 1)
-        # Formulė: (10 USDT * 25x svertas) / BTC kaina = BTC kiekis
-        btc_amount = (MARGIN_USDT * LEVERAGE) / entry_price
-        
-        # Paverčiame į MEXC kontraktus (suapvaliname į mažesnę pusę, kad neviršyti 10 USDT)
-        amount = int(btc_amount * 10000) / 10000  # Standartinis BTC kontraktų žingsnis
-        amount = float(exchange.amount_to_precision(symbol, amount))
-        
-        # Jei netyčia gavosi 0, priverstinai nustatome mažiausią įmanomą (1 kontraktą)
-        if amount <= 0:
-            amount = 1.0
+        # 4. Atidarome SHORT (Sutvarkyta pagal paskutinę klaidą)
+        order = exchange.create_order(
+            symbol=SYMBOL,
+            type='market',
+            side='sell',
+            amount=amount,
+            params={
+                'posSide': 'SHORT',
+                'openType': 1,
+                'leverage': int(LEVERAGE) # Čia buvo pagrindinė klaida
+            }
+        )
 
-        print(f"Apskaičiuotas kiekis prekybai: {amount} contracts")
-
-        # 3. ATIDAROME POZICIJĄ
-        print(f"Atidarau {action}...")
-        exchange.create_order(symbol, 'market', side, amount, params={
-            'positionMode': pos_mode,
-            'openType': 1  # 1 = Atidaryti naują poziciją
-        })
-
-        # 4. STATOME STOP LOSS
-        exchange.create_order(symbol, 'stop_market', close_side, amount, None, {
-            'stopPrice': sl_price, 
-            'reduceOnly': True,
-            'positionMode': pos_mode
-        })
-
-        # 5. STATOME TAKE PROFIT
-        exchange.create_order(symbol, 'limit', close_side, amount, tp_price, {
-            'reduceOnly': True,
-            'positionMode': pos_mode
-        })
-
-        msg = f"Sekme! {action} atidarytas. Kiekis: {amount}. SL: {sl_price}, TP: {tp_price}"
-        print(msg)
-        return msg, 200
+        print(f"Short atidarytas: {order['id']}")
+        return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
-        print(f"Klaida vykdant sandori: {str(e)}")
-        return str(e), 400
+        print(f"KLAIDA: {traceback.format_exc()}")
+        return {"error": str(e)}, 400
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
