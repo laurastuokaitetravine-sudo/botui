@@ -5,7 +5,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -14,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10.0   # <<< ČIA TAVO 10 USDT
+MARGIN_USDT = 25.0 
 SYMBOL = 'BTC/USDT:USDT'
 
 @app.route('/')
@@ -27,64 +27,51 @@ def webhook():
         data = request.json
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-
-        action = str(data.get('action')).lower()
-        if action not in ['long', 'short']:
+        
+        if str(data.get('action')).lower() != 'short':
             return "Ignored", 200
 
-        # Anti-duplicate
-        if os.path.exists("/tmp/last_order.lock"):
-            return "Duplicate", 200
-        open("/tmp/last_order.lock", "w").write("1")
-
-        # Market data
+        # 1. Rinkos duomenys
         markets = exchange.load_markets()
         market = markets[SYMBOL]
         ticker = exchange.fetch_ticker(SYMBOL)
         entry_price = float(ticker['last'])
+        
+        # 2. Kiekio skaičiavimas
+        total_value = MARGIN_USDT * LEVERAGE
+        raw_amount = total_value / entry_price
+        min_cost = float(market['limits']['cost']['min'])
+        min_qty = min_cost / entry_price
 
-        # --- TEISINGAS MINIMALUS ORDERIS ---
-        min_cost = float(market['limits']['cost']['min'])   # minimalus USDT dydis
-        min_qty = min_cost / entry_price                    # konvertuojam į BTC
-
-        # --- TAVO ORDERIO DYDIS ---
-        raw_qty = MARGIN_USDT / entry_price                 # 10 USDT / BTC kaina
-        final_qty = max(raw_qty, min_qty)                   # turi būti >= minCost
+        
+        # Imam didesnį iš skaičiuoto arba minimalaus
+        final_qty = max(raw_amount, min_qty)
         amount = float(exchange.amount_to_precision(SYMBOL, final_qty))
 
-        # Leverage
+        # 3. Svertas (Isolated režimas)
         try:
-            exchange.set_leverage(LEVERAGE, SYMBOL)
+            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
         except:
             pass
 
-        # Orderio kryptis
-        side = 'buy' if action == 'long' else 'sell'
-        pos_side = 'LONG' if action == 'long' else 'SHORT'
-
-        # Orderis
+        # 4. Atidarome SHORT (Sutvarkyta pagal paskutinę klaidą)
         order = exchange.create_order(
             symbol=SYMBOL,
             type='market',
-            side=side,
+            side='sell',
             amount=amount,
             params={
-                'positionSide': pos_side,
-                'leverage': LEVERAGE
+                'posSide': 'SHORT',
+                'openType': 1,
+                'leverage': int(LEVERAGE) # Čia buvo pagrindinė klaida
             }
         )
 
-        os.remove("/tmp/last_order.lock")
-
-        print(f"{action.upper()} atidarytas: {order['id']}")
+        print(f"Short atidarytas: {order['id']}")
         return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
-        try:
-            os.remove("/tmp/last_order.lock")
-        except:
-            pass
         return {"error": str(e)}, 400
 
 if __name__ == '__main__':
