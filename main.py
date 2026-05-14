@@ -28,10 +28,9 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # SPRENDIMAS KLAIDAI 415: Priverstinai nuskaitome JSON, net jei Content-Type yra neteisingas
+        # Priverstinai nuskaitome JSON duomenis
         data = request.get_json(force=True, silent=True)
         
-        # Jei Flask vis tiek neranda duomenų, nuskaitome žalią tekstą ir paverčiame rankiniu būdu
         if not data:
             try:
                 raw_data = request.data.decode('utf-8').strip()
@@ -54,24 +53,30 @@ def webhook():
         ticker = exchange.fetch_ticker(SYMBOL)
         entry_price = float(ticker['last'])
         
-        # 2. Dinaminis SL ir TP (1:2) skaičiavimas pagal indikatoriaus SL
-        sl_price = data.get('sl_price')
+        # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
+        raw_sl = data.get('sl_price')
+        sl_price = None
         tp_price = None
         
-        if sl_price:
-            sl_price = float(sl_price)
-            # Apskaičiuojame atstumą nuo įėjimo iki Stop Loss (SHORT pozicijai: SL turi būti > įėjimo kainos)
-            risk_distance = sl_price - entry_price
-            
-            if risk_distance > 0:
-                # Take Profit bus 2 kartus toliau į apačią (1:2 santykis)
-                tp_price = entry_price - (risk_distance * 2)
-            else:
-                # Atsarginis saugiklis, jei TradingView atsiuntė klaidingą arba mažesnę SL reikšmę
-                sl_price = entry_price * 1.01
-                tp_price = entry_price * 0.98
-        else:
-            # Jei TradingView išvis neatsiuntė SL reikšmės, naudojame standartinį 1% SL ir 2% TP
+        # Tikriname, ar gautas SL yra realus skaičius (ne NaN, ne na, ne tuščias)
+        if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
+            try:
+                sl_price = float(raw_sl)
+                risk_distance = sl_price - entry_price
+                
+                if risk_distance > 0:
+                    # Sėkmingas 1:2 skaičiavimas pagal indikatoriaus SL
+                    tp_price = entry_price - (risk_distance * 2)
+                else:
+                    # Saugiklis, jei SL kaina gauta mažesnė už rinkos kainą
+                    sl_price = entry_price * 1.01
+                    tp_price = entry_price * 0.98
+            except ValueError:
+                # Jei teksto nepavyko paversti į skaičių
+                sl_price = None
+
+        # Jei SL nerastas arba buvo klaidingas, naudojame standartinį 1% SL ir 2% TP
+        if sl_price is na or tp_price is na:
             sl_price = entry_price * 1.01
             tp_price = entry_price * 0.98
 
