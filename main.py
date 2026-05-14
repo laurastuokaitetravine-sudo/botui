@@ -43,9 +43,10 @@ def webhook():
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
-        # Tikriname, ar gautas SHORT signalas
-        if str(data.get('action')).lower() != 'short':
-            return "Ignored", 200
+        # Tikriname prekybos veiksmą (LONG arba SHORT)
+        action = str(data.get('action')).lower()
+        if action not in ['long', 'short']:
+            return "Ignored (Invalid Action)", 200
 
         # 1. Rinkos duomenys
         markets = exchange.load_markets()
@@ -58,33 +59,42 @@ def webhook():
         sl_price = None
         tp_price = None
         
-        # Tikriname, ar gautas SL yra realus skaičius (ne NaN, ne na, ne tuščias)
+        # Tikriname, ar gautas SL yra realus skaičius
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
                 sl_price = float(raw_sl)
-                risk_distance = sl_price - entry_price
-                
-                if risk_distance > 0:
-                    # Sėkmingas 1:2 skaičiavimas pagal indikatoriaus SL
-                    tp_price = entry_price - (risk_distance * 2)
-                else:
-                    # Saugiklis, jei SL kaina gauta mažesnė už rinkos kainą
-                    sl_price = entry_price * 1.01
-                    tp_price = entry_price * 0.98
             except ValueError:
-                # Jei teksto nepavyko paversti į skaičių
                 sl_price = None
 
-        # Jei SL nerastas arba buvo klaidingas, naudojame standartinį 1% SL ir 2% TP
-        if sl_price is na or tp_price is na:
-            sl_price = entry_price * 1.01
-            tp_price = entry_price * 0.98
+        # 3. KRYPTIES LOGIKA IR 1:2 MATEMATIKA
+        if action == 'long':
+            side = 'buy'
+            pos_side = 'LONG'
+            if sl_price and sl_price < entry_price:
+                risk_distance = entry_price - sl_price
+                tp_price = entry_price + (risk_distance * 2)
+                
+        elif action == 'short':
+            side = 'sell'
+            pos_side = 'SHORT'
+            if sl_price and sl_price > entry_price:
+                risk_distance = sl_price - entry_price
+                tp_price = entry_price - (risk_distance * 2)
+
+        # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas (pakeista iš na į None)
+        if sl_price is None or tp_price is None:
+            if action == 'long':
+                sl_price = entry_price * 0.99
+                tp_price = entry_price * 1.02
+            elif action == 'short':
+                sl_price = entry_price * 1.01
+                tp_price = entry_price * 0.98
 
         # Suapvaliname kainas pagal MEXC taisykles
         sl_price = float(exchange.price_to_precision(SYMBOL, sl_price))
         tp_price = float(exchange.price_to_precision(SYMBOL, tp_price))
 
-        # 3. Kiekio skaičiavimas pritaikytas MEXC fjučerių kontraktams
+        # 4. Kiekio skaičiavimas pritaikytas MEXC fjučerių kontraktams
         total_value = MARGIN_USDT * LEVERAGE
         raw_btc_amount = total_value / entry_price
         
@@ -96,31 +106,31 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(SYMBOL, final_contracts))
 
-        # 4. Svertas (Isolated režimas)
+        # 5. Svertas (Isolated režimas)
         try:
             exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
         except:
             pass
 
-        # 5. Užsakymo parametrų paruošimas su biržos TP/SL
+        # 6. Užsakymo parametrų paruošimas su biržos TP/SL
         params = {
-            'posSide': 'SHORT',
+            'posSide': pos_side,
             'openType': 1,
             'leverage': int(LEVERAGE),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price
         }
 
-        # 6. Vykdome užsakymą biržoje
+        # 7. Vykdome užsakymą biržoje
         order = exchange.create_order(
             symbol=SYMBOL,
             type='market',
-            side='sell',
+            side=side,
             amount=amount,
             params=params
         )
 
-        print(f"SHORT sėkmingai atidarytas! ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        print(f"{pos_side} sėkmingai atidarytas! ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
         return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
