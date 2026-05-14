@@ -1,6 +1,5 @@
 import os
 import traceback
-import math
 from flask import Flask, request
 import ccxt
 
@@ -15,7 +14,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 LEVERAGE = 25
-MARGIN_USDT = 10.0  # Jūsų norima marža (užstatas)
+MARGIN_USDT = 10.0   # <<< ČIA TAVO 10 USDT
 SYMBOL = 'BTC/USDT:USDT'
 
 @app.route('/')
@@ -28,67 +27,64 @@ def webhook():
         data = request.json
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-        
-        if str(data.get('action')).lower() != 'short':
+
+        action = str(data.get('action')).lower()
+        if action not in ['long', 'short']:
             return "Ignored", 200
 
-        # 1. Rinkos duomenys
+        # Anti-duplicate
+        if os.path.exists("/tmp/last_order.lock"):
+            return "Duplicate", 200
+        open("/tmp/last_order.lock", "w").write("1")
+
+        # Market data
         markets = exchange.load_markets()
         market = markets[SYMBOL]
         ticker = exchange.fetch_ticker(SYMBOL)
         entry_price = float(ticker['last'])
-        
-        # 2. GRIEŽTAS KIEKIO SKAIČIAVIMAS
-        # Bendra pozicijos vertė (pvz., 10 USDT * 25 svertas = 250 USDT pozicija)
-        total_value = float(MARGIN_USDT) * float(LEVERAGE)
-        raw_amount = total_value / entry_price
-        
-        # Sužinome biržos žingsnį (lot size). BTC dažniausiai yra 0.0001
-        min_qty = float(market['limits']['amount']['min'])
-        
-        # Nukertame skaičių po kablelio žemyn (floor), kad neviršytume biudžeto
-        # Pvz., jei reikia 0.004347, suapvaliname iki 0.0043
-        step_decimals = int(abs(math.log10(min_qty))) if min_qty < 1 else 0
-        factor = 10 ** step_decimals
-        final_qty = math.floor(raw_amount * factor) / factor
-        
-        # Saugiklis: jei suapvalintas kiekis mažesnis už biržos minimumą, imam minimumą
-        amount = max(final_qty, min_qty)
-        
-        # Galutinis patikrinimas per CCXT saugumo funkciją
-        amount = float(exchange.amount_to_precision(SYMBOL, amount))
 
-        print(f"--- VYKDYMAS ---")
-        print(f"Esama kaina: {entry_price} USDT")
-        print(f"Skaičiuojama marža: {MARGIN_USDT} USDT (Svertas: {LEVERAGE}x)")
-        print(f"Bendra užsakymo vertė rinkoje: {amount * entry_price} USDT")
-        print(f"Perkamas kiekis: {amount} BTC")
+        # --- TEISINGAS MINIMALUS ORDERIS ---
+        min_cost = float(market['limits']['cost']['min'])   # minimalus USDT dydis
+        min_qty = min_cost / entry_price                    # konvertuojam į BTC
 
-        # 3. Sverto ir maržos režimo nustatymas
+        # --- TAVO ORDERIO DYDIS ---
+        raw_qty = MARGIN_USDT / entry_price                 # 10 USDT / BTC kaina
+        final_qty = max(raw_qty, min_qty)                   # turi būti >= minCost
+        amount = float(exchange.amount_to_precision(SYMBOL, final_qty))
+
+        # Leverage
         try:
-            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
-        except Exception as leverage_err:
-            # Dažnai meta klaidą, jei svertas jau nustatytas – tiesiog ignoruojame
+            exchange.set_leverage(LEVERAGE, SYMBOL)
+        except:
             pass
 
-        # 4. Užsakymo siuntimas į MEXC
+        # Orderio kryptis
+        side = 'buy' if action == 'long' else 'sell'
+        pos_side = 'LONG' if action == 'long' else 'SHORT'
+
+        # Orderis
         order = exchange.create_order(
             symbol=SYMBOL,
             type='market',
-            side='sell',
+            side=side,
             amount=amount,
             params={
-                'posSide': 'SHORT',
-                'openType': 1,
-                'leverage': int(LEVERAGE)
+                'positionSide': pos_side,
+                'leverage': LEVERAGE
             }
         )
 
-        print(f"Short sėkmingai atidarytas! ID: {order['id']}")
-        return {"status": "success", "order_id": order['id'], "amount": amount}, 200
+        os.remove("/tmp/last_order.lock")
+
+        print(f"{action.upper()} atidarytas: {order['id']}")
+        return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
+        try:
+            os.remove("/tmp/last_order.lock")
+        except:
+            pass
         return {"error": str(e)}, 400
 
 if __name__ == '__main__':
