@@ -43,10 +43,10 @@ def webhook():
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
-        # Tikriname prekybos veiksmą (LONG arba SHORT)
-        action = str(data.get('action')).lower()
-        if action not in ['long', 'short']:
-            return "Ignored (Invalid Action)", 200
+        # Saugiai pasiimame veiksmą ir priimame TIK short signalus
+        action = str(data.get('action', '')).lower()
+        if action != 'short':
+            return "Ignored (Only SHORT allowed)", 200
 
         # 1. Rinkos duomenys
         markets = exchange.load_markets()
@@ -66,29 +66,15 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # 3. KRYPTIES LOGIKA IR 1:2 MATEMATIKA
-        if action == 'long':
-            side = 'buy'
-            pos_side = 'LONG'
-            if sl_price and sl_price < entry_price:
-                risk_distance = entry_price - sl_price
-                tp_price = entry_price + (risk_distance * 2)
-                
-        elif action == 'short':
-            side = 'sell'
-            pos_side = 'SHORT'
-            if sl_price and sl_price > entry_price:
-                risk_distance = sl_price - entry_price
-                tp_price = entry_price - (risk_distance * 2)
+        # 3. IŠVALYTA MATEMATIKA: Tik SHORT pozicijos 1:2 skaičiavimas
+        if sl_price and sl_price > entry_price:
+            risk_distance = sl_price - entry_price
+            tp_price = entry_price - (risk_distance * 2)
 
-        # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas (pakeista iš na į None)
+        # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas
         if sl_price is None or tp_price is None:
-            if action == 'long':
-                sl_price = entry_price * 0.99
-                tp_price = entry_price * 1.02
-            elif action == 'short':
-                sl_price = entry_price * 1.01
-                tp_price = entry_price * 0.98
+            sl_price = entry_price * 1.01
+            tp_price = entry_price * 0.98
 
         # Suapvaliname kainas pagal MEXC taisykles
         sl_price = float(exchange.price_to_precision(SYMBOL, sl_price))
@@ -112,25 +98,25 @@ def webhook():
         except:
             pass
 
-        # 6. Užsakymo parametrų paruošimas su biržos TP/SL
+        # 6. Užsakymo parametrų paruošimas (Fiksuota TIK SHORT pozicijai)
         params = {
-            'posSide': pos_side,
+            'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(LEVERAGE),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price
         }
 
-        # 7. Vykdome užsakymą biržoje
+        # 7. Vykdome užsakymą biržoje (side='sell' fiksas SHORT atidarymui)
         order = exchange.create_order(
             symbol=SYMBOL,
             type='market',
-            side=side,
+            side='sell',
             amount=amount,
             params=params
         )
 
-        print(f"{pos_side} sėkmingai atidarytas! ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        print(f"SHORT sėkmingai atidarytas! ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
         return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
