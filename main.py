@@ -17,8 +17,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-LEVERAGE = 10
-MARGIN_USDT = 2.0 
+LEVERAGE = 25
+MARGIN_USDT = 5.0 
 
 @app.route('/')
 def home():
@@ -83,7 +83,7 @@ def webhook():
         # 3. IŠVALYTA MATEMATIKA: Tik SHORT pozicijos 1:2 skaičiavimas
         if sl_price and sl_price > entry_price:
             risk_distance = sl_price - entry_price
-            tp_price = entry_price - (risk_distance * 2)
+            tp_price = entry_price - (risk_distance * 1)
 
         # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas
         if sl_price is None or tp_price is None:
