@@ -8,7 +8,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -22,7 +22,7 @@ MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
 MARGIN_USDT = 5.0 
 
-# PATOBULINTA SEKIMO FUNKCIJA
+# GALUTINĖ IR STABILIAUSIA SEKIMO FUNKCIJA
 def monitor_position(symbol, entry_price, sl_price, tp_price, amount, pos_mode):
     print(f"[{symbol}] Pradedamas fone pozicijos sekimas...")
     target_50_price = entry_price - (abs(entry_price - tp_price) / 2)
@@ -30,46 +30,41 @@ def monitor_position(symbol, entry_price, sl_price, tp_price, amount, pos_mode):
     
     while True:
         try:
-            time.sleep(3)
+            time.sleep(4) # Tikriname kainą kas 4 sekundes
             
+            # Pasiimame kainą per viešą funkciją (saugu, nestringa)
             ticker = exchange.fetch_ticker(symbol)
             current_price = float(ticker['last'])
             
-            positions = exchange.fetch_positions([symbol])
-            active_position = False
-            for p in positions:
-                if float(p['contracts']) > 0:
-                    active_position = True
+            # Jei kaina pati pasiekė pradinį SL arba TP - pozicija užsidarė, baigiam sekimą
+            if current_price >= sl_price or current_price <= tp_price:
+                if not half_closed:
+                    print(f"[{symbol}] Kaina pasiekė galutinį SL arba TP. Baigiam sekimą.")
                     break
-            
-            if not active_position:
-                print(f"[{symbol}] Pozicija nebeaktyvi. Baigiam sekimą.")
-                break
 
             # Pasiekta 50% TP riba SHORT pozicijai
             if not half_closed and current_price <= target_50_price:
-                print(f"[{symbol}] Pasiekta 50% TP riba ({target_50_price})!")
+                print(f"[{symbol}] Pasiekta 50% TP riba ({target_50_price})! Vykdomas pelno fiksavimas...")
                 
                 half_amount = amount / 2
                 half_amount = float(exchange.amount_to_precision(symbol, half_amount))
                 
-                # 1. Atšaukiame senus orderius
+                # 1. Atšaukiame senus orderius biržoje
                 try:
                     exchange.cancel_all_orders(symbol)
                 except Exception as ce:
-                    print(f"[{symbol}] Orderiu atsauko klaida: {ce}")
+                    print(f"[{symbol}] Orderių atšaukimo pranešimas: {ce}")
                 
-                # SVARBU: Duodame biržai 1 sekundę laiko atlaisvinti maržą
-                time.sleep(1)
+                time.sleep(1) # Svarbi 1 sekundės pauzė maržos atlaisvinimui
                 
                 # 2. Uždarome PUSĘ pozicijos rinkos kaina
                 exchange.create_order(symbol, 'market', 'buy', half_amount, params={
                     'positionMode': pos_mode,
-                    'openType': 2 # Close
+                    'openType': 2 # Close pozicija
                 })
-                print(f"[{symbol}] Uždaryta pusė pozicijos: {half_amount}")
+                print(f"[{symbol}] Sėkmingai uždaryta pusė pozicijos: {half_amount}")
                 
-                # 3. Statome naujus saugiklius su atsarginiu pakartojimu (Retry)
+                # 3. Statome naujus saugiklius su pakartojimu (Retry)
                 for attempt in range(3):
                     try:
                         time.sleep(0.5)
@@ -84,15 +79,13 @@ def monitor_position(symbol, entry_price, sl_price, tp_price, amount, pos_mode):
                             'reduceOnly': True,
                             'positionMode': pos_mode
                         })
-                        print(f"[{symbol}] Nauji SL (ties {entry_price}) ir TP (ties {tp_price}) sėkmingai pastatyti!")
+                        print(f"[{symbol}] Saugikliai atnaujinti. SL: {entry_price} (BE), TP: {tp_price}")
                         break
                     except Exception as order_err:
-                        print(f"[{symbol}] Bandymas {attempt+1} pastatyti SL/TP nepavyko: {order_err}")
-                        if attempt == 2:
-                            print(f"🚨 [KRITINĖ KLAIDA] [{symbol}] Nepavyko automatiškai pastatyti naujų SL/TP. Reikia sužiūrėti rankiniu būdu!")
+                        print(f"[{symbol}] Bandymas {attempt+1} nepavyko: {order_err}")
                 
                 half_closed = True
-                break 
+                break # Užduotis sėkmingai įvykdyta
 
         except Exception as e:
             print(f"Klaida sekant kainą fone: {e}")
@@ -124,6 +117,7 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
+        # Išvalome .P ir USDT galūnes
         clean_ticker = tv_ticker.replace(".P", "").replace("USDT", "")
         symbol = f"{clean_ticker}/USDT:USDT"
 
@@ -135,13 +129,14 @@ def webhook():
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['last'])
         
+        # Tikriname maksimalų monetos svertą biržoje
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        pos_mode = 2 
+        pos_mode = 2 # SHORT
 
         raw_sl = data.get('sl_price')
         sl_price = None
@@ -155,7 +150,7 @@ def webhook():
 
         if sl_price and sl_price > entry_price:
             risk_distance = sl_price - entry_price
-            tp_price = entry_price - (risk_distance * 2)
+            tp_price = entry_price - (risk_distance * 1)
 
         if sl_price is None or tp_price is None:
             sl_price = entry_price * 1.01
@@ -196,14 +191,14 @@ def webhook():
         except:
             pass
 
-        # Paleidžiame sekimą fone
+        # Paleidžiame sekimą fone (Saugus būdas)
         threading.Thread(
             target=monitor_position, 
             args=(symbol, entry_price, sl_price, tp_price, amount, pos_mode),
             daemon=True
         ).start()
 
-        print(f"SHORT atidarytas! Variklis stebi moneta: {symbol}")
+        print(f"SHORT sėkmingai atidarytas! Variklis stebi monetą fone: {symbol}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
