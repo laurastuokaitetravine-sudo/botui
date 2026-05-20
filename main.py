@@ -17,7 +17,7 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-LEVERAGE = 25
+DEFAULT_LEVERAGE = 25  # Tavo norimas svertas
 MARGIN_USDT = 5.0 
 
 @app.route('/')
@@ -47,14 +47,13 @@ def webhook():
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
-        # --- DALYKAS 1: DINAMINIS MONETOS PAVADINIMAS ---
-        # Pasiimame monetą iš TradingView (pvz., "BTCUSDT" arba "SOLUSDT")
+        # Dinaminis monetos pavadinimas
         tv_ticker = data.get('ticker')
         if not tv_ticker:
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Konvertuojame TradingView formatą į MEXC Futures formatą (pvz., "SOL/USDT:USDT")
+        # Konvertuojame TradingView formatą ir išvalome .P bei USDT galūnes
         clean_ticker = tv_ticker.replace(".P", "").replace("USDT", "")
         symbol = f"{clean_ticker}/USDT:USDT"
 
@@ -68,34 +67,45 @@ def webhook():
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['last'])
         
+        # --- SVERTO DINAMINIS PATIKRINIMAS (PATAISYMAS KLAIDAI) ---
+        # CCXT paima limitus iš rinkos duomenų, jei jų nėra - naudojam DEFAULT_LEVERAGE
+        max_leverage = DEFAULT_LEVERAGE
+        if 'limits' in market and 'leverage' in market['limits']:
+            if market['limits']['leverage']['max'] is not None:
+                max_leverage = int(market['limits']['leverage']['max'])
+
+        # Pasirenkame mažesnį svertą: tavo norimą arba maksimalų leistiną biržoje
+        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
+        # --------------------------------------------------------
+
         # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
         raw_sl = data.get('sl_price')
         sl_price = None
         tp_price = None
         
-        # Tikriname, ar gautas SL yra realus skaičius
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
                 sl_price = float(raw_sl)
             except ValueError:
                 sl_price = None
 
-        # 3. IŠVALYTA MATEMATIKA: Tik SHORT pozicijos 1:2 skaičiavimas
+        # 3. Matematika: SHORT pozicijos 1:2 skaičiavimas
         if sl_price and sl_price > entry_price:
             risk_distance = sl_price - entry_price
-            tp_price = entry_price - (risk_distance * 1)
+            tp_price = entry_price - (risk_distance * 2)
 
-        # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas
+        # Atsarginis planas
         if sl_price is None or tp_price is None:
             sl_price = entry_price * 1.01
             tp_price = entry_price * 0.98
 
-        # Suapvaliname kainas pagal konkrečios monetos MEXC taisykles
+        # Suapvaliname kainas
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # 4. Kiekio skaičiavimas pritaikytas konkrečios monetos fjučerių kontraktams
-        total_value = MARGIN_USDT * LEVERAGE
+        # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
+        total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
         contract_size = float(market.get('contractSize', 1.0))
@@ -107,16 +117,24 @@ def webhook():
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
         # 5. Svertas (Isolated režimas nustatomas šiai monetai)
+        if action == 'short':
+            pos_mode = 2
+        else:
+            pos_mode = 1
+
         try:
-            exchange.set_leverage(int(LEVERAGE), symbol, {'marginMode': 'isolated'})
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,      
+                'positionType': pos_mode
+            })
         except:
             pass
 
-        # 6. Užsakymo parametrų paruošimas (Fiksuota TIK SHORT pozicijai)
+        # 6. Užsakymo parametrų paruošimas
         params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': int(LEVERAGE),
+            'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price
         }
@@ -130,7 +148,7 @@ def webhook():
             params=params
         )
 
-        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
