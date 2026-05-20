@@ -17,9 +17,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-LEVERAGE = 25
-MARGIN_USDT = 10.0 
-SYMBOL = 'BTC/USDT:USDT'
+LEVERAGE = 10
+MARGIN_USDT = 5.0 
 
 @app.route('/')
 def home():
@@ -48,10 +47,25 @@ def webhook():
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
-        # 1. Rinkos duomenys
+        # --- DALYKAS 1: DINAMINIS MONETOS PAVADINIMAS ---
+        # Pasiimame monetą iš TradingView (pvz., "BTCUSDT" arba "SOLUSDT")
+        tv_ticker = data.get('ticker')
+        if not tv_ticker:
+            print("Klaida: Žinutėje negautas 'ticker' kintamasis")
+            return {"error": "Missing ticker in request"}, 400
+
+        # Konvertuojame TradingView formatą į MEXC Futures formatą (pvz., "SOL/USDT:USDT")
+        base_currency = tv_ticker.replace("USDT", "")
+        symbol = f"{base_currency}/USDT:USDT"
+
+        # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
-        market = markets[SYMBOL]
-        ticker = exchange.fetch_ticker(SYMBOL)
+        if symbol not in markets:
+            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
+            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
+
+        market = markets[symbol]
+        ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['last'])
         
         # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
@@ -76,25 +90,25 @@ def webhook():
             sl_price = entry_price * 1.01
             tp_price = entry_price * 0.98
 
-        # Suapvaliname kainas pagal MEXC taisykles
-        sl_price = float(exchange.price_to_precision(SYMBOL, sl_price))
-        tp_price = float(exchange.price_to_precision(SYMBOL, tp_price))
+        # Suapvaliname kainas pagal konkrečios monetos MEXC taisykles
+        sl_price = float(exchange.price_to_precision(symbol, sl_price))
+        tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # 4. Kiekio skaičiavimas pritaikytas MEXC fjučerių kontraktams
+        # 4. Kiekio skaičiavimas pritaikytas konkrečios monetos fjučerių kontraktams
         total_value = MARGIN_USDT * LEVERAGE
-        raw_btc_amount = total_value / entry_price
+        raw_crypto_amount = total_value / entry_price
         
         contract_size = float(market.get('contractSize', 1.0))
-        contracts_qty = raw_btc_amount / contract_size
+        contracts_qty = raw_crypto_amount / contract_size
         
         min_contracts = float(market['limits']['amount']['min'])
         final_contracts = max(contracts_qty, min_contracts)
         
-        amount = float(exchange.amount_to_precision(SYMBOL, final_contracts))
+        amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # 5. Svertas (Isolated režimas)
+        # 5. Svertas (Isolated režimas nustatomas šiai monetai)
         try:
-            exchange.set_leverage(int(LEVERAGE), SYMBOL, {'marginMode': 'isolated'})
+            exchange.set_leverage(int(LEVERAGE), symbol, {'marginMode': 'isolated'})
         except:
             pass
 
@@ -107,17 +121,17 @@ def webhook():
             'takeProfitPrice': tp_price
         }
 
-        # 7. Vykdome užsakymą biržoje (side='sell' fiksas SHORT atidarymui)
+        # 7. Vykdome užsakymą biržoje
         order = exchange.create_order(
-            symbol=SYMBOL,
+            symbol=symbol,
             type='market',
             side='sell',
             amount=amount,
             params=params
         )
 
-        print(f"SHORT sėkmingai atidarytas! ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
-        return {"status": "success", "order_id": order['id']}, 200
+        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
