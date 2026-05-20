@@ -1,12 +1,14 @@
 import os
 import json
 import traceback
+import time
+import threading
 from flask import Flask, request
 import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
+# --- KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -17,8 +19,79 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25  # Tavo norimas svertas
+DEFAULT_LEVERAGE = 25  
 MARGIN_USDT = 5.0 
+
+# Funkcija, kuri stebi kainą fone ir valdo 50% TP bei Break-Even
+def monitor_position(symbol, entry_price, sl_price, tp_price, amount, pos_mode):
+    print(f"[{symbol}] Pradedamas fone pozicijos sekimas...")
+    
+    # Paskaičiuojame, kur yra pusė kelio iki TP (50% TP tikslo)
+    # Kadangi tai SHORT, kaina krenta. Pusė kelio bus žemiau įėjimo kainos.
+    target_50_price = entry_price - (abs(entry_price - tp_price) / 2)
+    
+    half_closed = False
+    
+    while True:
+        try:
+            time.sleep(3) # Tikriname kainą kas 3 sekundes
+            
+            # Atsiunčiame naujausią kainą
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = float(ticker['last'])
+            
+            # Tikriname, ar pozicija dar gyva biržoje
+            positions = exchange.fetch_positions([symbol])
+            active_position = False
+            for p in positions:
+                if float(p['contracts']) > 0:
+                    active_position = True
+                    break
+            
+            if not active_position:
+                print(f"[{symbol}] Pozicija biržoje nebėra aktyvi. Baigiam sekimą.")
+                break
+
+            # SHORT sandoriui: kaina nukrito žemiau 50% TP ribos
+            if not half_closed and current_price <= target_50_price:
+                print(f"[{symbol}] Pasiekta 50% TP riba ({target_50_price})! Vykdomi veiksmai...")
+                
+                half_amount = amount / 2
+                half_amount = float(exchange.amount_to_precision(symbol, half_amount))
+                
+                # 1. Atšaukiame senus SL ir TP orderius, kad jie netrukdytų
+                try:
+                    exchange.cancel_all_orders(symbol)
+                except:
+                    pass
+                
+                # 2. Uždarome PUSĘ pozicijos (perkam rinkos kaina SHORT uždarymui)
+                exchange.create_order(symbol, 'market', 'buy', half_amount, params={
+                    'positionMode': pos_mode,
+                    'openType': 2 # 2 = Close pozicija
+                })
+                print(f"[{symbol}] Sėkmingai uždaryta pusė pozicijos: {half_amount}")
+                
+                # 3. Statome NAUJĄ Stop Loss ant Break-Even (įėjimo kainos) likusiam kiekiui
+                exchange.create_order(symbol, 'stop_market', 'buy', half_amount, None, {
+                    'stopPrice': entry_price, 
+                    'reduceOnly': True,
+                    'positionMode': pos_mode
+                })
+                
+                # 4. Statome NAUJĄ Take Profit pirminiam tikslui likusiam kiekiui
+                exchange.create_order(symbol, 'limit', 'buy', half_amount, tp_price, {
+                    'reduceOnly': True,
+                    'positionMode': pos_mode
+                })
+                
+                print(f"[{symbol}] SL perkeltas ant BE ({entry_price}). Likęs TP ties: {tp_price}")
+                half_closed = True
+                break # Užduotis įvykdyta, fone stebėjimą baigiame (birža pati uždarys likusį)
+
+        except Exception as e:
+            print(f"Klaida sekant kainą fone: {e}")
+            time.sleep(5)
 
 @app.route('/')
 def home():
@@ -27,7 +100,6 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Priverstinai nuskaitome JSON duomenis
         data = request.get_json(force=True, silent=True)
         
         if not data:
@@ -35,51 +107,38 @@ def webhook():
                 raw_data = request.data.decode('utf-8').strip()
                 data = json.loads(raw_data)
             except Exception as json_err:
-                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
                 return {"error": "Invalid JSON format"}, 400
 
-        # Slaptažodžio patikrinimas
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
-        # Saugiai pasiimame veiksmą ir priimame TIK short signalus
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
-        # Dinaminis monetos pavadinimas
         tv_ticker = data.get('ticker')
         if not tv_ticker:
-            print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Konvertuojame TradingView formatą ir išvalome .P bei USDT galūnes
         clean_ticker = tv_ticker.replace(".P", "").replace("USDT", "")
         symbol = f"{clean_ticker}/USDT:USDT"
 
-        # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
         if symbol not in markets:
-            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['last'])
         
-        # --- SVERTO DINAMINIS PATIKRINIMAS (PATAISYMAS KLAIDAI) ---
-        # CCXT paima limitus iš rinkos duomenų, jei jų nėra - naudojam DEFAULT_LEVERAGE
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
 
-        # Pasirenkame mažesnį svertą: tavo norimą arba maksimalų leistiną biržoje
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
-        # --------------------------------------------------------
+        pos_mode = 2 # SHORT fijo
 
-        # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
         raw_sl = data.get('sl_price')
         sl_price = None
         tp_price = None
@@ -90,21 +149,17 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # 3. Matematika: SHORT pozicijos 1:2 skaičiavimas
         if sl_price and sl_price > entry_price:
             risk_distance = sl_price - entry_price
             tp_price = entry_price - (risk_distance * 2)
 
-        # Atsarginis planas
         if sl_price is None or tp_price is None:
             sl_price = entry_price * 1.01
             tp_price = entry_price * 0.98
 
-        # Suapvaliname kainas
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
@@ -116,39 +171,35 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # 5. Svertas (Isolated režimas nustatomas šiai monetai)
-        if action == 'short':
-            pos_mode = 2
-        else:
-            pos_mode = 1
-
         try:
-            exchange.set_leverage(int(final_leverage), symbol, {
-                'openType': 1,      
-                'positionType': pos_mode
-            })
+            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
-        # 6. Užsakymo parametrų paruošimas
-        params = {
-            'posSide': 'SHORT',
-            'openType': 1,
-            'leverage': int(final_leverage),
-            'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price
-        }
-
-        # 7. Vykdome užsakymą biržoje
+        # Atidaro pradinę poziciją
         order = exchange.create_order(
             symbol=symbol,
             type='market',
             side='sell',
             amount=amount,
-            params=params
+            params={'posSide': 'SHORT', 'openType': 1, 'leverage': int(final_leverage)}
         )
 
-        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        # Pirminis SL ir TP pastatymas saugumui
+        try:
+            exchange.create_order(symbol, 'stop_market', 'buy', amount, None, {'stopPrice': sl_price, 'reduceOnly': True, 'positionMode': pos_mode})
+            exchange.create_order(symbol, 'limit', 'buy', amount, tp_price, {'reduceOnly': True, 'positionMode': pos_mode})
+        except:
+            pass
+
+        # --- SVARBU: Paleidžiame sekimą fone ---
+        threading.Thread(
+            target=monitor_position, 
+            args=(symbol, entry_price, sl_price, tp_price, amount, pos_mode),
+            daemon=True
+        ).start()
+
+        print(f"SHORT atidarytas fone sekimui! Moneta: {symbol} | SL: {sl_price} | TP: {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
