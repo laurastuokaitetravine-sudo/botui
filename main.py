@@ -55,8 +55,8 @@ def webhook():
             return {"error": "Missing ticker in request"}, 400
 
         # Konvertuojame TradingView formatą į MEXC Futures formatą (pvz., "SOL/USDT:USDT")
-        base_currency = tv_ticker.replace("USDT", "")
-        symbol = f"{base_currency}/USDT:USDT"
+        clean_ticker = tv_ticker.replace(".P", "").replace("USDT", "")
+        symbol = f"{clean_ticker}/USDT:USDT"
 
         # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
