@@ -90,15 +90,13 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # 3. Matematika: SHORT pozicijos 1:2 skaičiavimas
-        if sl_price and sl_price > entry_price:
-            risk_distance = sl_price - entry_price
-            tp_price = entry_price - (risk_distance * 1)
+                # 3. Matematika: SHORT pozicijos 20% pelno skaičiavimas
+        tp_price = entry_price * 0.992
 
-        # Atsarginis planas
-        if sl_price is None or tp_price is None:
-            sl_price = entry_price * 1.01
-            tp_price = entry_price * 0.98
+        # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
+        if sl_price is None or sl_price <= entry_price:
+            sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
+
 
         # Suapvaliname kainas
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
