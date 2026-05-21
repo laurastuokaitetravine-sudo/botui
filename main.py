@@ -53,9 +53,10 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Konvertuojame TradingView formatą ir išvalome .P bei USDT galūnes
-        clean_ticker = tv_ticker.replace(".P", "").replace("USDT", "")
+        # Išvalome .P, brūkšnius ir USDT galūnes, kad gautume tikrąjį MEXC formatą
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         symbol = f"{clean_ticker}/USDT:USDT"
+
 
         # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
