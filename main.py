@@ -93,9 +93,13 @@ def webhook():
                 # 3. Matematika: SHORT pozicijos 20% pelno skaičiavimas
         tp_price = entry_price * 0.992
 
-        # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
+                # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
         if sl_price is None or sl_price <= entry_price:
             sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
+
+        # ŠI EILUTĖ TURI BŪTI ČIA (Lygiai su 'if' pradžia)
+        sl_price = entry_price + ((sl_price - entry_price) / 2)
+
 
 
         # Suapvaliname kainas
