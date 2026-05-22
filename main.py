@@ -17,7 +17,7 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25  # Tavo norimas svertas
+DEFAULT_LEVERAGE = 25  
 MARGIN_USDT = 10.0 
 
 @app.route('/')
@@ -27,7 +27,6 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Priverstinai nuskaitome JSON duomenis
         data = request.get_json(force=True, silent=True)
         
         if not data:
@@ -38,27 +37,25 @@ def webhook():
                 print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
                 return {"error": "Invalid JSON format"}, 400
 
-        # Slaptažodžio patikrinimas
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
-        # Saugiai pasiimame veiksmą ir priimame TIK short signalus
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
-        # Dinaminis monetos pavadinimas
         tv_ticker = data.get('ticker')
         if not tv_ticker:
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Išvalome .P, brūkšnius ir USDT galūnes, kad gautume tikrąjį MEXC formatą
+        # Universali monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        if clean_ticker == "PEPE":
+            clean_ticker = "10000PEPE"
+            
         symbol = f"{clean_ticker}/USDT:USDT"
 
-
-        # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
         if symbol not in markets:
             print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
@@ -66,24 +63,20 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])
+        entry_price = float(ticker['last'])  # Tai bus tavo Limit kaina (dabartinė rinkos kaina signalo akimirką)
         
-        # --- SVERTO DINAMINIS PATIKRINIMAS (PATAISYMAS KLAIDAI) ---
-        # CCXT paima limitus iš rinkos duomenų, jei jų nėra - naudojam DEFAULT_LEVERAGE
+        # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
 
-        # Pasirenkame mažesnį svertą: tavo norimą arba maksimalų leistiną biržoje
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
-        # --------------------------------------------------------
 
-        # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
+        # Saugus dinaminio SL nurašymas
         raw_sl = data.get('sl_price')
         sl_price = None
-        tp_price = None
         
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
@@ -91,23 +84,21 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-                # 3. Matematika: SHORT pozicijos 20% pelno skaičiavimas
+        # --- 3. MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
         tp_price = entry_price * 0.992
 
-                # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
         if sl_price is None or sl_price <= entry_price:
-            sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
+            sl_price = entry_price * 1.01  
 
-        # ŠI EILUTĖ TURI BŪTI ČIA (Lygiai su 'if' pradžia)
+        # Sumažiname SL atstumą perpus
         sl_price = entry_price + ((sl_price - entry_price) / 2)
 
-
-
-        # Suapvaliname kainas
+        # Suapvaliname kainas pagal biržos taisykles
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
+        # Kiekio skaičiavimas fjučerių kontraktams
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
@@ -119,11 +110,7 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # 5. Svertas (Isolated režimas nustatomas šiai monetai)
-        if action == 'short':
-            pos_mode = 2
-        else:
-            pos_mode = 1
+        pos_mode = 2 # SHORT fijo
 
         try:
             exchange.set_leverage(int(final_leverage), symbol, {
@@ -133,7 +120,7 @@ def webhook():
         except:
             pass
 
-        # 6. Užsakymo parametrų paruošimas
+        # Užsakymo parametrų paruošimas
         params = {
             'posSide': 'SHORT',
             'openType': 1,
@@ -142,16 +129,17 @@ def webhook():
             'takeProfitPrice': tp_price
         }
 
-        # 7. Vykdome užsakymą biržoje
+        # --- PAKEITIMAS: VYKDOMA KAIP LIMIT ORDERIS ---
         order = exchange.create_order(
             symbol=symbol,
-            type='market',
+            type='limit',       # Pakeista iš 'market' į 'limit'
             side='sell',
             amount=amount,
+            price=entry_price,  # Privalomas parametras Limit orderiams
             params=params
         )
 
-        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        print(f"SHORT LIMIT užsakymas pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
