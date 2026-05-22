@@ -1,6 +1,8 @@
 import os
 import json
 import traceback
+import time
+import threading
 from flask import Flask, request
 import ccxt
 
@@ -20,6 +22,21 @@ MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
 MARGIN_USDT = 10.0 
 
+# --- FONINĖ FUNKCIJA: AUTOMATIŠKAI IŠTRINA ORDERĮ PO 15 MINUČIŲ, JEI JIS NEUŽSIPILDĖ ---
+def cancel_unfilled_order(symbol, order_id):
+    print(f"[{symbol}] Fone paleidžiamas 15 minučių laikmatis orderiui {order_id}...")
+    time.sleep(900)  # 15 minučių = 900 sek
+    try:
+        order_info = exchange.fetch_order(order_id, symbol)
+        status = order_info.get('status')
+        if status == 'open':
+            exchange.cancel_order(order_id, symbol)
+            print(f"⏰ [{symbol}] Praėjo 15 min. Limit orderis {order_id} nebuvo užpildytas, todėl automatiškai atšauktas iš biržos.")
+        else:
+            print(f"[{symbol}] Orderis {order_id} jau užpildytas arba uždarytas (Statusas: {status}). Atšaukti nereikia.")
+    except Exception as e:
+        print(f"Klaida tikrinant laukiantį orderį fone: {e}")
+
 @app.route('/')
 def home():
     return "BOTAS ONLINE", 200
@@ -28,13 +45,11 @@ def home():
 def webhook():
     try:
         data = request.get_json(force=True, silent=True)
-        
         if not data:
             try:
                 raw_data = request.data.decode('utf-8').strip()
                 data = json.loads(raw_data)
             except Exception as json_err:
-                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
                 return {"error": "Invalid JSON format"}, 400
 
         if not data or data.get('passphrase') != MY_PASSWORD:
@@ -46,10 +61,8 @@ def webhook():
 
         tv_ticker = data.get('ticker')
         if not tv_ticker:
-            print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
@@ -58,23 +71,22 @@ def webhook():
 
         markets = exchange.load_markets()
         if symbol not in markets:
-            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])  # Esama rinkos kaina signalo akimirką
         
-        # Sverto tikrinimas
+        # --- 1. TEISINGAS POSLINKIS SHORT ĮĖJIMUI ---
+        current_price = float(ticker['last'])
+        limit_entry_price = current_price * 1.0003  # Statome 0.03% AUKŠČIAU, kad sėkmingai pakibtų
+        
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
 
-        # Saugus dinaminio SL nurašymas
         raw_sl = data.get('sl_price')
         sl_price = None
         
@@ -84,23 +96,20 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
-        tp_price = entry_price * 0.992
+        tp_price = limit_entry_price * 0.992
 
-        if sl_price is None or sl_price <= entry_price:
-            sl_price = entry_price * 1.01  
+        if sl_price is None or sl_price <= limit_entry_price:
+            sl_price = limit_entry_price * 1.01  
 
-        # Sumažiname SL atstumą perpus
-        sl_price = entry_price + ((sl_price - entry_price) / 2)
+        sl_price = limit_entry_price + ((sl_price - limit_entry_price) / 2)
 
         # Suapvaliname kainas pagal biržos taisykles
-        entry_price = float(exchange.price_to_precision(symbol, entry_price))
+        limit_entry_price = float(exchange.price_to_precision(symbol, limit_entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # Kiekio skaičiavimas fjučerių kontraktams
         total_value = MARGIN_USDT * final_leverage
-        raw_crypto_amount = total_value / entry_price
+        raw_crypto_amount = total_value / limit_entry_price
         
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_crypto_amount / contract_size
@@ -110,38 +119,58 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        pos_mode = 2 # SHORT fiksuotas
+        pos_mode = 2 
 
         try:
-            exchange.set_leverage(int(final_leverage), symbol, {
-                'openType': 1,      
-                'positionType': pos_mode
-            })
+            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
-        # Užsakymo parametrų paruošimas su Post-Only taisykle
-        params = {
+        # --- ŽINGSNIS A: Siunčiame TIK įėjimo užsakymą su PostOnly (Be TP/SL konflikto) ---
+        open_params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
-            'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # Užtikrina 0% mokesčių (Maker) įvykdymą
+            'timeInForce': 'PostOnly'  
         }
 
-        # Vykdoma kaip LIMIT užsakymas su mokesčių saugikliu
         order = exchange.create_order(
             symbol=symbol,
             type='limit',       
             side='sell',
             amount=amount,
-            price=entry_price,  
-            params=params
+            price=limit_entry_price,  
+            params=open_params
         )
 
-        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
-        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+        order_id = order['id']
+        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | ID: {order_id} | Kaina: {limit_entry_price}")
+
+        # --- ŽINGSNIS B: Atskirai prikabiname apsaugas ---
+        try:
+            exchange.create_order(
+                symbol=symbol,
+                type='limit',  
+                side='buy',    # Priešinga pusė uždarymui
+                amount=amount,
+                params={
+                    'posSide': 'SHORT',
+                    'stopLossPrice': sl_price,
+                    'takeProfitPrice': tp_price
+                }
+            )
+            print(f"Apsaugos sėkmingai prikabintos | SL: {sl_price} | TP: {tp_price}")
+        except Exception as tp_sl_err:
+            print(f"Įspėjimas: TP/SL bus sukurti vėliau, kai orderis pilnai užsipildys rinkoje: {tp_sl_err}")
+
+        # --- 15 MINUČIŲ SEKLIUS FONE ---
+        threading.Thread(
+            target=cancel_unfilled_order, 
+            args=(symbol, order_id),
+            daemon=True
+        ).start()
+
+        return {"status": "success", "symbol": symbol, "order_id": order_id}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
