@@ -20,9 +20,9 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 10.0 
+MARGIN_USDT = 15.0  # Tavo nustatyta 15 USDT marža
 
-# --- FONINĖ FUNKCIJA: AUTOMATIŠKAI IŠTRINA ORDERĮ PO 15 MINUČIŲ, JEI JIS NEUŽSIPILDĖ ---
+# --- FONINĖ FUNKCIJA A: AUTOMATIŠKAI IŠTRINA ORDERĮ PO 15 MINUČIŲ, JEI JIS NEUŽSIPILDĖ ---
 def cancel_unfilled_order(symbol, order_id):
     print(f"[{symbol}] Fone paleidžiamas 15 minučių laikmatis orderiui {order_id}...")
     time.sleep(900)  # 15 minučių = 900 sek
@@ -36,6 +36,38 @@ def cancel_unfilled_order(symbol, order_id):
             print(f"[{symbol}] Orderis {order_id} jau užpildytas arba uždarytas (Statusas: {status}). Atšaukti nereikia.")
     except Exception as e:
         print(f"Klaida tikrinant laukiantį orderį fone: {e}")
+
+# --- FONINĖ FUNKCIJA B: AKTYVIAI LAUKIA UŽSIPILDYMO IR TADA SAUGIAI UŽDEDA TP/SL ---
+def watch_and_apply_tpsl(symbol, order_id, amount, sl_price, tp_price, market_id):
+    print(f"[{symbol}] Fone paleidžiamas pozicijos seklys apsaugoms uždėti...")
+    for _ in range(450):  # Tikrins kas 2 sekundes, iš viso 15 minučių (450 kartų)
+        time.sleep(2)
+        try:
+            check_order = exchange.fetch_order(order_id, symbol)
+            status = check_order.get('status')
+            
+            # Jei orderis užsipildė arba jau matomas bent dalinis užpildymas
+            if status in ['closed', 'filled'] or float(check_order.get('filled', 0)) > 0:
+                # Naudojame oficialų MEXC API trigerį aktyvios pozicijos TP/SL uždėjimui
+                exchange.private_post_linear_order_create({
+                    'symbol': market_id,
+                    'price': 0, 
+                    'vol': amount,
+                    'side': 3,  # CLOSE_SHORT (Uždaryti shortą)
+                    'type': 3,  # Trigger Market tipo orderis apsaugoms
+                    'openType': 1,
+                    'stopLossPrice': sl_price,
+                    'takeProfitPrice': tp_price
+                })
+                print(f"🔥 [{symbol}] Pozicija užsipildė! Apsaugos sėkmingai prikabintos | SL: {sl_price} | TP (30%): {tp_price}")
+                break  # Darbą baigiame, nes apsaugos sėkmingai uždėtos
+                
+            if status == 'canceled':
+                print(f"[{symbol}] Užsakymas buvo atšauktas, apsaugų seklys stabdomas.")
+                break
+        except Exception as e:
+            print(f"Klaida foniniame TP/SL seklyje: {e}")
+            time.sleep(5)
 
 @app.route('/')
 def home():
@@ -63,6 +95,7 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
+        # Universali monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
@@ -76,9 +109,9 @@ def webhook():
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
         
-        # --- 1. TEISINGAS POSLINKIS SHORT ĮĖJIMUI ---
+        # --- 1. TEISINGAS POSLINKIS SHORT ĮĖJIMUI (0.03% AUKŠČIAU KNYGOJE) ---
         current_price = float(ticker['last'])
-        limit_entry_price = current_price * 1.0003  # Statome 0.03% AUKŠČIAU, kad sėkmingai pakibtų
+        limit_entry_price = current_price * 1.0003  
         
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
@@ -96,7 +129,8 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        tp_price = limit_entry_price * 0.992
+        # --- MATEMATIKA: 30% PELNAS (1.2% kainos judesys žemyn su 25x svertu) ---
+        tp_price = limit_entry_price * 0.988
 
         if sl_price is None or sl_price <= limit_entry_price:
             sl_price = limit_entry_price * 1.01  
@@ -119,19 +153,19 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        pos_mode = 2 
+        pos_mode = 2 # SHORT fiksuotas
 
         try:
             exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
-        # --- ŽINGSNIS A: Siunčiame TIK įėjimo užsakymą su PostOnly (Be TP/SL konflikto) ---
+        # --- ŽINGSNIS A: Siunčiame TIK įėjimo LIMIT užsakymą su PostOnly ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
-            'timeInForce': 'PostOnly'  
+            'timeInForce': 'PostOnly'  # Garantuoja 0% mokesčių (Maker) tarifą
         }
 
         order = exchange.create_order(
@@ -146,24 +180,14 @@ def webhook():
         order_id = order['id']
         print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | ID: {order_id} | Kaina: {limit_entry_price}")
 
-        # --- ŽINGSNIS B: Atskirai prikabiname apsaugas ---
-        try:
-            exchange.create_order(
-                symbol=symbol,
-                type='limit',  
-                side='buy',    # Priešinga pusė uždarymui
-                amount=amount,
-                params={
-                    'posSide': 'SHORT',
-                    'stopLossPrice': sl_price,
-                    'takeProfitPrice': tp_price
-                }
-            )
-            print(f"Apsaugos sėkmingai prikabintos | SL: {sl_price} | TP: {tp_price}")
-        except Exception as tp_sl_err:
-            print(f"Įspėjimas: TP/SL bus sukurti vėliau, kai orderis pilnai užsipildys rinkoje: {tp_sl_err}")
+        # --- ŽINGSNIS B: Paleidžiame foninį seklį, kuris lauks užsipildymo ir TADA saugiai uždės TP/SL ---
+        threading.Thread(
+            target=watch_and_apply_tpsl, 
+            args=(symbol, order_id, amount, sl_price, tp_price, market['id']),
+            daemon=True
+        ).start()
 
-        # --- 15 MINUČIŲ SEKLIUS FONE ---
+        # --- ŽINGSNIS C: Paleidžiame 15 minučių laikmatį užsakymo išvalymui iš knygos ---
         threading.Thread(
             target=cancel_unfilled_order, 
             args=(symbol, order_id),
