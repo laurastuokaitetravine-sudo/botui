@@ -97,8 +97,8 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
-        tp_price = limit_entry_price * 0.992
+        # --- PAKEISTA MATEMATIKA: 30% PELNAS (1.2% kainos judesys žemyn su 25x svertu) ---
+        tp_price = limit_entry_price * 0.988
 
         if sl_price is None or sl_price <= limit_entry_price:
             sl_price = limit_entry_price * 1.01  
@@ -166,7 +166,7 @@ def webhook():
                     'stopLossPrice': sl_price,
                     'takeProfitPrice': tp_price
                 })
-                print(f"Apsaugos sėkmingai prikabintos prie veikiančios pozicijos! SL: {sl_price} | TP: {tp_price}")
+                print(f"Apsaugos sėkmingai prikabintos prie veikiančios pozicijos! SL: {sl_price} | TP (30%): {tp_price}")
             else:
                 print(f"[{symbol}] Orderis dar kabo knygoje (Open). TP/SL bus uždėti automatiškai, kai tik kaina pasieks limitą.")
         except Exception as tp_sl_err:
