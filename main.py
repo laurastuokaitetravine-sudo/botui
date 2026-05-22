@@ -63,7 +63,7 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])  # Esama rinkos kaina signalo akimirką
+        entry_price = float(ticker['last'])  # Esama rinkos kaina 15 min žvakės užsidarymo sekundę
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -130,7 +130,7 @@ def webhook():
             'timeInForce': 'PostOnly'  # Užtikrina 0% mokesčių (Maker) įvykdymą
         }
 
-        # Vykdoma kaip LIMIT užsakymas su mokesčių saugikliu
+        # Vykdoma kaip LIMIT užsakymas su mokesčių ir pakibimo saugikliu
         order = exchange.create_order(
             symbol=symbol,
             type='limit',       
