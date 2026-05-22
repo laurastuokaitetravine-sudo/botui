@@ -17,8 +17,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-LEVERAGE = 10
-MARGIN_USDT = 5.0 
+DEFAULT_LEVERAGE = 25  # Tavo norimas svertas
+MARGIN_USDT = 10.0 
 
 @app.route('/')
 def home():
@@ -47,16 +47,20 @@ def webhook():
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
-        # --- DALYKAS 1: DINAMINIS MONETOS PAVADINIMAS ---
-        # Pasiimame monetą iš TradingView (pvz., "BTCUSDT" arba "SOLUSDT")
+        # Dinaminis monetos pavadinimas
         tv_ticker = data.get('ticker')
         if not tv_ticker:
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Konvertuojame TradingView formatą į MEXC Futures formatą (pvz., "SOL/USDT:USDT")
-        base_currency = tv_ticker.replace("USDT", "")
-        symbol = f"{base_currency}/USDT:USDT"
+        # Išvalome .P, brūkšnius ir USDT galūnes, kad gautume tikrąjį MEXC formatą
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        
+        # PATAISYMAS: Grąžinama PEPE konvertavimo logika MEXC biržai
+        if clean_ticker == "PEPE":
+            clean_ticker = "10000PEPE"
+            
+        symbol = f"{clean_ticker}/USDT:USDT"
 
         # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
@@ -65,37 +69,53 @@ def webhook():
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
+        
+        # --- SAUGIKLIS: Išvalome senus šios monetos užsakymus prieš naują sandorį ---
+        try:
+            exchange.cancel_all_orders(symbol)
+            print(f"Išvalyti visi seni užsakymai monetai: {symbol}")
+        except Exception as cancel_err:
+            print(f"Pastaba: Nepavyko išvalyti senų užsakymų: {cancel_err}")
+
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['last'])
         
-        # 2. Saugus dinaminio SL ir TP (1:2) nurašymas
+        # --- SVERTO DINAMINIS PATIKRINIMAS ---
+        max_leverage = DEFAULT_LEVERAGE
+        if 'limits' in market and 'leverage' in market['limits']:
+            if market['limits']['leverage']['max'] is not None:
+                max_leverage = int(market['limits']['leverage']['max'])
+
+        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
+
+        # 2. Saugus dinaminio SL nurašymas
         raw_sl = data.get('sl_price')
         sl_price = None
-        tp_price = None
         
-        # Tikriname, ar gautas SL yra realus skaičius
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
                 sl_price = float(raw_sl)
             except ValueError:
                 sl_price = None
 
-        # 3. IŠVALYTA MATEMATIKA: Tik SHORT pozicijos 1:2 skaičiavimas
-        if sl_price and sl_price > entry_price:
-            risk_distance = sl_price - entry_price
-            tp_price = entry_price - (risk_distance * 2)
+        # --- MATEMATIKA: SHORT pozicijos 20% pelno skaičiavimas ---
+        tp_price = entry_price * 0.992
 
-        # ATSARGINIS PLANAS: Jei SL nerastas arba buvo klaidingas
-        if sl_price is None or tp_price is None:
-            sl_price = entry_price * 1.01
-            tp_price = entry_price * 0.98
+        # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
+        if sl_price is None or sl_price <= entry_price:
+            sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
 
-        # Suapvaliname kainas pagal konkrečios monetos MEXC taisykles
+        # SL atstumo mažinimas perpus (Lygiai su 'if' pradžia)
+        sl_price = entry_price + ((sl_price - entry_price) / 2)
+
+        # Suapvaliname kainas pagal biržos taisykles
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # 4. Kiekio skaičiavimas pritaikytas konkrečios monetos fjučerių kontraktams
-        total_value = MARGIN_USDT * LEVERAGE
+        # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
+        total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
         contract_size = float(market.get('contractSize', 1.0))
@@ -107,31 +127,80 @@ def webhook():
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
         # 5. Svertas (Isolated režimas nustatomas šiai monetai)
+        pos_mode = 2  # SHORT fiksuotas
+
         try:
-            exchange.set_leverage(int(LEVERAGE), symbol, {'marginMode': 'isolated'})
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,      
+                'positionType': pos_mode
+            })
         except:
             pass
 
-        # 6. Užsakymo parametrų paruošimas (Fiksuota TIK SHORT pozicijai)
-        params = {
+        # --- 6 ŽINGSNIS: Pozicijos atidarymas rinkos kaina (MARKET) ---
+        # Pašalinti probleminiai stopLossPrice ir takeProfitPrice parametrai iš čia
+        open_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': int(LEVERAGE),
-            'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price
+            'leverage': int(final_leverage)
         }
 
-        # 7. Vykdome užsakymą biržoje
         order = exchange.create_order(
             symbol=symbol,
             type='market',
             side='sell',
             amount=amount,
-            params=params
+            params=open_params
         )
+        print(f"SHORT pozicija sėkmingai atidaryta rinkos kaina! ID: {order['id']}")
 
-        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
-        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+        # --- 7 ŽINGSNIS: Atskiri saugūs TP ir SL užsakymai ---
+        try:
+            # STOP LOSS užsakymas (SHORT pozicijai uždaryti reikia BUY sandorio)
+            sl_params = {
+                'posSide': 'SHORT',
+                'openType': 1,
+                'stopPrice': sl_price,
+                'type': 'stop'
+            }
+            exchange.create_order(
+                symbol=symbol,
+                type='limit',
+                side='buy',
+                amount=amount,
+                price=sl_price,
+                params=sl_params
+            )
+            print(f"Atskiras SL nustatytas ties: {sl_price}")
+
+            # TAKE PROFIT užsakymas (Uždarymas su pelnu)
+            tp_params = {
+                'posSide': 'SHORT',
+                'openType': 1,
+                'stopPrice': tp_price,
+                'type': 'stop'
+            }
+            exchange.create_order(
+                symbol=symbol,
+                type='limit',
+                side='buy',
+                amount=amount,
+                price=tp_price,
+                params=tp_params
+            )
+            print(f"Atskiras TP nustatytas ties: {tp_price}")
+
+        except Exception as trigger_err:
+            print(f"ĮSPĖJIMAS: Nepavyko automatiškai prikabinti atskirų TP/SL: {trigger_err}")
+
+        return {
+            "status": "success", 
+            "symbol": symbol, 
+            "order_id": order['id'],
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp_price": tp_price
+        }, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
