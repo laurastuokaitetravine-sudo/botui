@@ -20,7 +20,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 10.0 
+MARGIN_USDT = 15.0 
 
 # --- FONINĖ FUNKCIJA: AUTOMATIŠKAI IŠTRINA ORDERI PO 15 MINUČIŲ, JEI JIS NEUŽSIPILDĖ ---
 def cancel_unfilled_order(symbol, order_id):
