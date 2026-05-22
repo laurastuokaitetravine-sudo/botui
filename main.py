@@ -1,6 +1,8 @@
 import os
 import json
 import traceback
+import time
+import threading
 from flask import Flask, request
 import ccxt
 
@@ -19,6 +21,27 @@ exchange = ccxt.mexc({
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
 MARGIN_USDT = 10.0 
+
+# --- FONINĖ FUNKCIJA: UŽSAKYMO ATŠAUKIMAS PO 30 MINUČIŲ (2 ŽVAKĖS) ---
+def cancel_order_after_timeout(symbol, order_id, timeout_seconds=1800):
+    """Laukia 30 minučių ir atšaukia limitinį užsakymą, jei jis vis dar aktyvus."""
+    try:
+        print(f"[TIMEOUT] Pradedamas 30 min laukimas užsakymui {order_id} ({symbol})...")
+        time.sleep(timeout_seconds)
+        
+        # Tikriname užsakymo būseną biržoje
+        fetched_order = exchange.fetch_order(order_id, symbol)
+        status = fetched_order.get('status')
+        
+        # Jei užsakymas vis dar atviras ('open'), jį atšaukiame
+        if status == 'open':
+            exchange.cancel_order(order_id, symbol)
+            print(f"[TIMEOUT SUCCESS] Užsakymas {order_id} monetai {symbol} atšauktas po dviejų 15min žvakių.")
+        else:
+            print(f"[TIMEOUT IGNORED] Užsakymas {order_id} neturi būti atšauktas. Esama būsena: {status}")
+            
+    except Exception as err:
+        print(f"[TIMEOUT ERROR] Nepavyko patikrinti/atšaukti užsakymo {order_id}: {err}")
 
 @app.route('/')
 def home():
@@ -141,6 +164,14 @@ def webhook():
         )
 
         print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
+        
+        # --- SAUGIKLIS: Paleidžiame foninį laikmatį užsakymo atšaukimui (30 min / 1800 sek) ---
+        threading.Thread(
+            target=cancel_order_after_timeout, 
+            args=(symbol, order['id'], 1800), 
+            daemon=True
+        ).start()
+
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
