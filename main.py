@@ -99,15 +99,16 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- MATEMATIKA: SHORT pozicijos 20% pelno skaičiavimas ---
+        # --- MATEMATIKA: SHORT pozicijos pelno skaičiavimas ---
+        # 0.8% kainos judesys žemyn su 25x svertu duoda lygiai 20% ROI pelno
         tp_price = entry_price * 0.992
 
         # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
         if sl_price is None or sl_price <= entry_price:
             sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
 
-        # SL atstumo mažinimas perpus (Lygiai su 'if' pradžia)
-        sl_price = entry_price + ((sl_price - entry_price) / 2)
+        # PATAISYMAS: Ištrinta eilutė, kuri mažino SL atstumą perpus.
+        # Dabar botas ims tikslią indikatoriaus atsiųstą SL kainą.
 
         # Suapvaliname kainas pagal biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
@@ -138,7 +139,6 @@ def webhook():
             pass
 
         # --- 6 ŽINGSNIS: Pozicijos atidarymas rinkos kaina (MARKET) ---
-        # Pašalinti probleminiai stopLossPrice ir takeProfitPrice parametrai iš čia
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
@@ -154,41 +154,39 @@ def webhook():
         )
         print(f"SHORT pozicija sėkmingai atidaryta rinkos kaina! ID: {order['id']}")
 
-        # --- 7 ŽINGSNIS: Atskiri saugūs TP ir SL užsakymai ---
+        # --- 7 ŽINGSNIS: Atskiri saugūs LIMIT TP ir SL užsakymai (PATAISYTA) ---
         try:
-            # STOP LOSS užsakymas (SHORT pozicijai uždaryti reikia BUY sandorio)
+            # STOP LOSS (Limit): Aktyvuojasi tik kainai pakilus iki sl_price
             sl_params = {
                 'posSide': 'SHORT',
                 'openType': 1,
-                'stopPrice': sl_price,
-                'type': 'stop'
+                'triggerPrice': sl_price,  # CCXT standartas MEXC biržai
             }
             exchange.create_order(
                 symbol=symbol,
-                type='limit',
+                type='limit',              
                 side='buy',
                 amount=amount,
-                price=sl_price,
+                price=sl_price,            
                 params=sl_params
             )
-            print(f"Atskiras SL nustatytas ties: {sl_price}")
+            print(f"Atskiras LIMIT SL nustatytas ties: {sl_price}")
 
-            # TAKE PROFIT užsakymas (Uždarymas su pelnu)
+            # TAKE PROFIT (Limit): Aktyvuojasi tik kainai nukritus iki tp_price
             tp_params = {
                 'posSide': 'SHORT',
                 'openType': 1,
-                'stopPrice': tp_price,
-                'type': 'stop'
+                'triggerPrice': tp_price,  # CCXT standartas MEXC biržai
             }
             exchange.create_order(
                 symbol=symbol,
-                type='limit',
+                type='limit',              
                 side='buy',
                 amount=amount,
-                price=tp_price,
+                price=tp_price,            
                 params=tp_params
             )
-            print(f"Atskiras TP nustatytas ties: {tp_price}")
+            print(f"Atskiras LIMIT TP nustatytas ties: {tp_price}")
 
         except Exception as trigger_err:
             print(f"ĮSPĖJIMAS: Nepavyko automatiškai prikabinti atskirų TP/SL: {trigger_err}")
