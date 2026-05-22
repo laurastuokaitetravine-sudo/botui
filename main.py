@@ -6,7 +6,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
+# --- KONFIGŪRACIJA (Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -63,7 +63,7 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])  # Esama rinkos kaina 15 min žvakės užsidarymo sekundę
+        entry_price = float(ticker['last'])  # Esama rinkos kaina žvakės užsidarymo sekundę
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -72,7 +72,7 @@ def webhook():
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
         # Saugus dinaminio SL nurašymas
         raw_sl = data.get('sl_price')
@@ -94,7 +94,6 @@ def webhook():
         sl_price = entry_price + ((sl_price - entry_price) / 2)
 
         # Suapvaliname kainas pagal biržos taisykles
-        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
@@ -120,27 +119,25 @@ def webhook():
         except:
             pass
 
-        # Užsakymo parametrų paruošimas su Post-Only taisykle
+        # PATAISYTA: Užsakymo parametrai pritaikyti MARKET orderiui su auto SL/TP
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # Užtikrina 0% mokesčių (Maker) įvykdymą
+            'takeProfitPrice': tp_price
         }
 
-        # Vykdoma kaip LIMIT užsakymas su mokesčių ir pakibimo saugikliu
+        # PATAISYTA: Vykdoma kaip MARKET užsakymas garantuotam pozicijos atidarymui
         order = exchange.create_order(
             symbol=symbol,
-            type='limit',       
+            type='market',       
             side='sell',
             amount=amount,
-            price=entry_price,  
             params=params
         )
 
-        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
+        print(f"SHORT MARKET įvykdytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
