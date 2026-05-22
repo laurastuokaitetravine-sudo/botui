@@ -63,7 +63,7 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])  # Tai bus tavo Limit kaina (dabartinė rinkos kaina signalo akimirką)
+        entry_price = float(ticker['last'])  # Esama rinkos kaina signalo akimirką
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -84,7 +84,7 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- 3. MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
+        # --- MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
         tp_price = entry_price * 0.992
 
         if sl_price is None or sl_price <= entry_price:
@@ -110,7 +110,7 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        pos_mode = 2 # SHORT fijo
+        pos_mode = 2 # SHORT fiksuotas
 
         try:
             exchange.set_leverage(int(final_leverage), symbol, {
@@ -120,26 +120,27 @@ def webhook():
         except:
             pass
 
-        # Užsakymo parametrų paruošimas
+        # Užsakymo parametrų paruošimas su Post-Only taisykle
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price
+            'takeProfitPrice': tp_price,
+            'timeInForce': 'PostOnly'  # Užtikrina 0% mokesčių (Maker) įvykdymą
         }
 
-        # --- PAKEITIMAS: VYKDOMA KAIP LIMIT ORDERIS ---
+        # Vykdoma kaip LIMIT užsakymas su mokesčių saugikliu
         order = exchange.create_order(
             symbol=symbol,
-            type='limit',       # Pakeista iš 'market' į 'limit'
+            type='limit',       
             side='sell',
             amount=amount,
-            price=entry_price,  # Privalomas parametras Limit orderiams
+            price=entry_price,  
             params=params
         )
 
-        print(f"SHORT LIMIT užsakymas pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
+        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
