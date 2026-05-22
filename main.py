@@ -6,7 +6,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Render Environment Variables) ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -63,13 +63,7 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        
-        # --- SAUGI LIMIT LOGIKA SU MAKER NUOLAIDA ---
-        current_price = float(ticker['last'])
-        
-        # Priverstinis poslinkis SHORT įėjimui: statome LIMIT kainą 0.04% ŽEMIAU esamos rinkos kainos.
-        # Tai užtikrina, kad Post-Only užsakymas pakibs orderbook'e ir nebus iškart atmestas biržos.
-        limit_entry_price = current_price * 0.9996 
+        entry_price = float(ticker['last'])  # Esama rinkos kaina signalo akimirką
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -78,7 +72,7 @@ def webhook():
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
 
         # Saugus dinaminio SL nurašymas
         raw_sl = data.get('sl_price')
@@ -90,23 +84,23 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- MATEMATIKA: PELNAS IR PERPUS SUMAŽINTAS SL ---
-        tp_price = limit_entry_price * 0.992
+        # --- MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
+        tp_price = entry_price * 0.992
 
-        if sl_price is None or sl_price <= limit_entry_price:
-            sl_price = limit_entry_price * 1.01  
+        if sl_price is None or sl_price <= entry_price:
+            sl_price = entry_price * 1.01  
 
         # Sumažiname SL atstumą perpus
-        sl_price = limit_entry_price + ((sl_price - limit_entry_price) / 2)
+        sl_price = entry_price + ((sl_price - entry_price) / 2)
 
         # Suapvaliname kainas pagal biržos taisykles
-        limit_entry_price = float(exchange.price_to_precision(symbol, limit_entry_price))
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
         # Kiekio skaičiavimas fjučerių kontraktams
         total_value = MARGIN_USDT * final_leverage
-        raw_crypto_amount = total_value / limit_entry_price
+        raw_crypto_amount = total_value / entry_price
         
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_crypto_amount / contract_size
@@ -126,27 +120,27 @@ def webhook():
         except:
             pass
 
-        # Griežtas LIMIT + Post-Only parametrų paruošimas
+        # Užsakymo parametrų paruošimas su Post-Only taisykle
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # Užtikrina 0% Maker mokesčius
+            'timeInForce': 'PostOnly'  # Užtikrina 0% mokesčių (Maker) įvykdymą
         }
 
-        # Vykdoma kaip LIMIT užsakymas
+        # Vykdoma kaip LIMIT užsakymas su mokesčių saugikliu
         order = exchange.create_order(
             symbol=symbol,
             type='limit',       
             side='sell',
             amount=amount,
-            price=limit_entry_price,
+            price=entry_price,  
             params=params
         )
 
-        print(f"SHORT LIMIT (Post-Only 0% mokestis) pastatytas! Moneta: {symbol} | LIMIT Kaina: {limit_entry_price} | SL: {sl_price} | TP: {tp_price}")
+        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP (20%): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
