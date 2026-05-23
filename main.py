@@ -66,7 +66,9 @@ def webhook():
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['last'])
+        
+        # Pakeista į 'ask', kad LIMIT orderis pasigautų kuo greičiau ir Post-Only veiktų patikimai
+        entry_price = float(ticker['ask'])
         
         # --- SVERTO DINAMINIS PATIKRINIMAS (PATAISYMAS KLAIDAI) ---
         # CCXT paima limitus iš rinkos duomenų, jei jų nėra - naudojam DEFAULT_LEVERAGE
@@ -91,10 +93,10 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-                # 3. Matematika: SHORT pozicijos 20% pelno skaičiavimas
+        # 3. Matematika: SHORT pozicijos 20% pelno skaičiavimas
         tp_price = entry_price * 0.992
 
-                # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
+        # Tavo gerasis Stop Loss išlaikymas su saugiu atsarginiu planu
         if sl_price is None or sl_price <= entry_price:
             sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius neatsiuntė skaičiaus
 
@@ -102,8 +104,8 @@ def webhook():
         sl_price = entry_price + ((sl_price - entry_price) / 2)
 
 
-
-        # Suapvaliname kainas
+        # Suapvaliname kainas pagal biržos taisykles
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
@@ -134,24 +136,30 @@ def webhook():
             pass
 
         # 6. Užsakymo parametrų paruošimas
+        # Pridėti tiesioginiai MEXC API raktai maksimaliam suderinamumui, kad iškart matytųsi skaičiai
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
-            'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price
+            'timeInForce': 'PostOnly',      # Užtikrina 0% mokesčių Maker statusą
+            'stopLossPrice': sl_price,      # CCXT standartas
+            'takeProfitPrice': tp_price,    # CCXT standartas
+            'tpPrice': tp_price,            # Grynasis MEXC raktažodis
+            'slPrice': sl_price,            # Grynasis MEXC raktažodis
+            'priceWay': 1
         }
 
-        # 7. Vykdome užsakymą biržoje
+        # 7. Vykdome užsakymą biržoje kaip LIMIT
         order = exchange.create_order(
             symbol=symbol,
-            type='market',
+            type='limit',  # PAKEISTA IŠ MARKET Į LIMIT
             side='sell',
             amount=amount,
+            price=entry_price,  # Pridėta privaloma LIMIT kaina
             params=params
         )
 
-        print(f"SHORT sėkmingai atidarytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
+        print(f"SHORT LIMIT sėkmingai pastatytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Įėjimas: {entry_price} | SL: {sl_price} | TP (1:2): {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
