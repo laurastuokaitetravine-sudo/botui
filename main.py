@@ -6,6 +6,7 @@ import ccxt
 
 app = Flask(__name__)
 
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -16,7 +17,7 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25  
+DEFAULT_LEVERAGE = 25  # Tavo norimas svertas
 MARGIN_USDT = 10.0 
 
 @app.route('/')
@@ -26,90 +27,127 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        # Priverstinai nuskaitome JSON duomenis
         data = request.get_json(force=True, silent=True)
+        
+        if not data:
+            try:
+                raw_data = request.data.decode('utf-8').strip()
+                data = json.loads(raw_data)
+            except Exception as json_err:
+                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
+                return {"error": "Invalid JSON format"}, 400
+
+        # Slaptažodžio patikrinimas
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
+        # Saugiai pasiimame veiksmą ir priimame TIK short signalus
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
+        # Dinaminis monetos pavadinimas
         tv_ticker = data.get('ticker')
         if not tv_ticker:
+            print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
+        # Išvalome .P, brūkšnius ir USDT galūnes, kad gautume tikrąjį MEXC formatą
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        
+        # Grąžinama PEPE konvertavimo logika MEXC biržai
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
             
         symbol = f"{clean_ticker}/USDT:USDT"
 
+        # 1. Rinkos duomenys konkrečiai monetai
         markets = exchange.load_markets()
         if symbol not in markets:
+            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
         
-        # Išvalome senus orderius
+        # --- SAUGIKLIS: Išvalome senus šios monetos užsakymus prieš naują sandorį ---
         try:
             exchange.cancel_all_orders(symbol)
-        except:
-            pass
+            print(f"Išvalyti visi seni užsakymai monetai: {symbol}")
+        except Exception as cancel_err:
+            print(f"Pastaba: Nepavyko išvalyti senų užsakymų: {cancel_err}")
 
         ticker = exchange.fetch_ticker(symbol)
         
-        # --- STRATEGINIS PAKEITIMAS: MAKER ĮĖJIMAS ---
-        # Kad LIMIT būtų MAKER, SHORT kainą keliame šiek tiek AUKŠČIAU dabartinės rinkos kainos (0.02%)
-        # Tai apsaugo nuo PostOnly atmetimo ir garantuoja 0% mokestį įeinant.
+        # Kad LIMIT būtų MAKER (0% mokestis), SHORT įėjimo kainą keliame vos vos aukščiau ask (0.02%)
         raw_price = float(ticker['ask'])
         entry_price = raw_price * 1.0002 
         
-        # Sverto tikrinimas
+        # --- SVERTO DINAMINIS PATIKRINIMAS ---
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
-        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
 
-        # SL nurašymas
+        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
+
+        # 2. Saugus dinaminio SL nurašymas iš TradingView
         raw_sl = data.get('sl_price')
         sl_price = None
+        
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
-            try: sl_price = float(raw_sl)
-            except ValueError: sl_price = None
+            try:
+                sl_price = float(raw_sl)
+                print(f"Iš indikatoriaus gauta SL kaina: {sl_price}")
+            except ValueError:
+                sl_price = None
 
-        # Pelno matematika (20% ROI)
+        # --- MATEMATIKA: SHORT pozicijos pelno skaičiavimas ---
+        # 0.8% kainos judesys žemyn su 25x svertu duoda lygiai 20% ROI pelno
         tp_price = entry_price * 0.992
 
+        # PATAISYTAS SAUGIKLIS: Kadangi vykdome SHORT, indikatoriaus SL PRIVALO būti didesnis už įėjimo kainą.
+        # Jei sl_price yra mažesnis arba lygus entry_price, tai logiškai yra LONG pozicijos SL, todėl SHORT pozicijai jis netinka.
+        # Tokiu atveju suveikia tavo atsarginis planras (1% virš įėjimo kainos).
         if sl_price is None or sl_price <= entry_price:
+            print(f"Įspėjimas: Indikatoriaus SL ({sl_price}) yra neteisingas SHORT pozicijai. Naudojamas atsarginis SL.")
             sl_price = entry_price * 1.01  
 
-        # Apvalinimai
+        # Suapvaliname kainas pagal biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # Kiekis
+        # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
+        
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_crypto_amount / contract_size
+        
         min_contracts = float(market['limits']['amount']['min'])
         final_contracts = max(contracts_qty, min_contracts)
+        
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # Sverto nustatymas
+        # 5. Svertas (Isolated režimas nustatomas šiai monetai)
+        pos_mode = 2  # SHORT fiksuotas
+
         try:
-            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': 2})
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,      
+                'positionType': pos_mode
+            })
         except:
             pass
 
-        # --- 1 UŽSAKYMAS: ĮĖJIMAS SU POST-ONLY (0% MAKER MOKESTIS) ---
+        # --- 6 ŽINGSNIS: Pozicijos atidarymas su PostOnly LIMIT (0% Maker mokestis) ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
-            'timeInForce': 'PostOnly'  # Garantuoja MAKER statusą
+            'timeInForce': 'PostOnly'  # Garantuoja, kad užsakymas pateks į knygą kaip Maker
         }
 
         order = exchange.create_order(
@@ -120,15 +158,16 @@ def webhook():
             price=entry_price,
             params=open_params
         )
-        print(f"Garantuotas 0% mokesčio SHORT pastatytas kaina: {entry_price}")
+        print(f"SHORT LIMIT (Post-Only) pastatytas kaina: {entry_price}! ID: {order['id']}")
 
-        # --- 2 UŽSAKYMAS: TAKE PROFIT TIESIOGINIS LIMIT (0% MAKER MOKESTIS) ---
-        # Šis orderis iškart atsistoja į knygą kaip pirkimas žemesne kaina. Kai rinka nukris, suveiks 0% Maker mokestis.
+        # --- 7 ŽINGSNIS: Atskiri LIMIT TP ir SL užsakymai (0% Maker tikslas) ---
         try:
+            # TAKE PROFIT (Grynas LIMIT): Atsistoja į orderių knygą kaip pirkimas žemiau.
+            # Kai kaina nukris iki čia, pozicija užsidarys su 0% Maker mokesčiu.
             tp_params = {
                 'posSide': 'SHORT',
                 'openType': 1,
-                'reduceOnly': True  # Tik uždarymui, kad nesukurti naujos pozicijos
+                'reduceOnly': True  # Užtikrina, kad tik uždarys esamą SHORT poziciją
             }
             exchange.create_order(
                 symbol=symbol,
@@ -140,12 +179,11 @@ def webhook():
             )
             print(f"Garantuotas 0% mokesčio LIMIT TP pastatytas ties: {tp_price}")
 
-            # --- 3 UŽSAKYMAS: STOP LOSS (TRIGGER) ---
-            # Stop loss negali būti paprastas limit orderis knygoje, nes kaina yra viršuje. Jis lieka trigger tipo.
+            # STOP LOSS (Trigger Limit): Aktyvuojasi tik kainai pakilus iki sl_price (paimto iš tavo indikatoriaus)
             sl_params = {
                 'posSide': 'SHORT',
                 'openType': 1,
-                'triggerPrice': sl_price,
+                'triggerPrice': sl_price,  # CCXT standartas triggeriavimui
             }
             exchange.create_order(
                 symbol=symbol,
@@ -155,12 +193,19 @@ def webhook():
                 price=sl_price,            
                 params=sl_params
             )
-            print(f"Apsauginis Trigger SL nustatytas ties: {sl_price}")
+            print(f"Apsauginis Trigger SL nustatytas ties tavo indikatoriaus kaina: {sl_price}")
 
         except Exception as trigger_err:
-            print(f"ĮSPĖJIMAS prikabinant TP/SL: {trigger_err}")
+            print(f"ĮSPĖJIMAS: Nepavyko automatiškai prikabinti atskirų TP/SL: {trigger_err}")
 
-        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+        return {
+            "status": "success", 
+            "symbol": symbol, 
+            "order_id": order['id'],
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp_price": tp_price
+        }, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
