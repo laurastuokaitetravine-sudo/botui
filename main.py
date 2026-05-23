@@ -79,9 +79,11 @@ def webhook():
 
         ticker = exchange.fetch_ticker(symbol)
         
+        # Tikroji esama rinkos kaina palyginimui
+        current_market_price = float(ticker['ask'])
+        
         # Kad LIMIT būtų MAKER (0% mokestis), SHORT įėjimo kainą keliame vos vos aukščiau ask (0.02%)
-        raw_price = float(ticker['ask'])
-        entry_price = raw_price * 1.0002 
+        entry_price = current_market_price * 1.0002 
         
         # --- SVERTO DINAMINIS PATIKRINIMAS ---
         max_leverage = DEFAULT_LEVERAGE
@@ -92,14 +94,14 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
 
-        # 2. Saugus dinaminio SL nurašymas iš TradingView
+        # 2. Saugus dinaminio SL nurašymas iš TradingView {{plot_0}}
         raw_sl = data.get('sl_price')
         sl_price = None
         
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
                 sl_price = float(raw_sl)
-                print(f"Iš indikatoriaus gauta SL kaina: {sl_price}")
+                print(f"TradingView atsiuntė SL kainą iš {{plot_0}}: {sl_price}")
             except ValueError:
                 sl_price = None
 
@@ -107,11 +109,10 @@ def webhook():
         # 0.8% kainos judesys žemyn su 25x svertu duoda lygiai 20% ROI pelno
         tp_price = entry_price * 0.992
 
-        # PATAISYTAS SAUGIKLIS: Kadangi vykdome SHORT, indikatoriaus SL PRIVALO būti didesnis už įėjimo kainą.
-        # Jei sl_price yra mažesnis arba lygus entry_price, tai logiškai yra LONG pozicijos SL, todėl SHORT pozicijai jis netinka.
-        # Tokiu atveju suveikia tavo atsarginis planras (1% virš įėjimo kainos).
-        if sl_price is None or sl_price <= entry_price:
-            print(f"Įspėjimas: Indikatoriaus SL ({sl_price}) yra neteisingas SHORT pozicijai. Naudojamas atsarginis SL.")
+        # PATAISYTAS SAUGIKLIS: Tikriname pagal realią rinkos kainą, o ne dirbtinai pakeltą entry_price.
+        # Jei indikatoriaus atsiųstas SL yra žemiau esamos rinkos kainos, tik tada naudojamas atsarginis variantas.
+        if sl_price is None or sl_price <= current_market_price:
+            print(f"Įspėjimas: Indikatoriaus SL ({sl_price}) yra žemiau rinkos kainos ({current_market_price}). Naudojamas atsarginis SL.")
             sl_price = entry_price * 1.01  
 
         # Suapvaliname kainas pagal biržos taisykles
@@ -163,7 +164,6 @@ def webhook():
         # --- 7 ŽINGSNIS: Atskiri LIMIT TP ir SL užsakymai (0% Maker tikslas) ---
         try:
             # TAKE PROFIT (Grynas LIMIT): Atsistoja į orderių knygą kaip pirkimas žemiau.
-            # Kai kaina nukris iki čia, pozicija užsidarys su 0% Maker mokesčiu.
             tp_params = {
                 'posSide': 'SHORT',
                 'openType': 1,
