@@ -88,7 +88,7 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} ({pos_side}) taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
 
-        # 2. Saugus dinaminio SL nuskaitymas
+        # 2. Saugus dinaminio SL ir TP skaičiavimas
         raw_sl = data.get('sl_price')
         sl_price = None
         
@@ -98,42 +98,18 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # 3. DINAMINIS TP (pelno didinimas) + koreguotas SL
-        # Bazinis TP ~0.8%, bet didėja pagal rinkos impulsą
-        # Impulsą matuojame pagal spread'ą / kainą (paprastas momentumo proxy)
-        try:
-            price_change = abs(ticker['bid'] - ticker['ask']) / entry_price
-        except Exception:
-            price_change = 0.0
-
-        base_tp = 0.008  # 0.8%
-
-        if price_change > 0.002:
-            tp_multiplier = 2.0   # iki ~1.6%
-        elif price_change > 0.001:
-            tp_multiplier = 1.5   # ~1.2%
-        else:
-            tp_multiplier = 1.0   # ~0.8%
-
+        # 3. Matematika abiem kryptims (0.8% pelno fiksavimas)
         if action == 'long':
-            # TP dinamiškai didinamas
-            tp_price = entry_price * (1 + base_tp * tp_multiplier)
-
-            # Jei SL neateina arba blogas – atsarginis 0.8% SL (geresnis R)
+            tp_price = entry_price * 1.008
             if sl_price is None or sl_price >= entry_price:
-                sl_price = entry_price * 0.992  # ~0.8% žemiau
-
-            # Pusės atstumo taisyklė
+                sl_price = entry_price * 0.99  # Atsarginis SL (1%), jei indikatorius klaidingas
+            # Pusės atstumo taisyklė tavo SL korekcijai
             sl_price = entry_price - ((entry_price - sl_price) / 2)
-        else:
-            # SHORT: TP žemiau, dinamiškai didinamas
-            tp_price = entry_price * (1 - base_tp * tp_multiplier)
-
-            # Jei SL neateina arba blogas – atsarginis 0.8% virš
+        else:  # short
+            tp_price = entry_price * 0.992
             if sl_price is None or sl_price <= entry_price:
-                sl_price = entry_price * 1.008  # ~0.8% aukščiau
-
-            # Pusės atstumo taisyklė
+                sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius klaidingas
+            # Pusės atstumo taisyklė tavo SL korekcijai
             sl_price = entry_price + ((sl_price - entry_price) / 2)
 
         # Suapvaliname kainas pagal biržos taisykles
@@ -142,4 +118,55 @@ def webhook():
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
         # 4. Kiekio skaičiavimas naudojant dinamiškai parinktą svertą
-        total_value = MARGIN_US
+        total_value = MARGIN_USDT * final_leverage
+        raw_crypto_amount = total_value / entry_price
+        
+        contract_size = float(market.get('contractSize', 1.0))
+        contracts_qty = raw_crypto_amount / contract_size
+        
+        min_contracts = float(market['limits']['amount']['min'])
+        final_contracts = max(contracts_qty, min_contracts)
+        
+        amount = float(exchange.amount_to_precision(symbol, final_contracts))
+
+        # 5. Svertas ir režimas nustatomas šiai monetai
+        try:
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,  # Isolated pozicija      
+                'positionType': pos_mode
+            })
+        except Exception as lev_err:
+            print(f"Sverto nustatymo praleidimas (galbūt jau nustatyta): {lev_err}")
+
+        # 6. Užsakymo parametrų paruošimas MARKET sandoriui
+        params = {
+            'posSide': pos_side,
+            'openType': 1,
+            'leverage': int(final_leverage),
+            'stopLossPrice': sl_price,      
+            'takeProfitPrice': tp_price,    
+            'tpPrice': tp_price,            
+            'slPrice': sl_price,            
+            'priceWay': 1
+        }
+
+        # 7. Vykdome užsakymą biržoje kaip MARKET
+        order = exchange.create_order(
+            symbol=symbol,
+            type='market',  # PAKEISTA IŠ LIMIT Į MARKET
+            side=side,
+            amount=amount,
+            price=None,     # MARKET orderiui kainos perduoti nereikia
+            params=params
+        )
+
+        print(f"{pos_side} MARKET sandoris sėkmingai įvykdytas! Moneta: {symbol} | Svertas: {final_leverage}x | ID: {order['id']} | Orientacinė įėjimo kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
+        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+
+    except Exception as e:
+        print(f"KLAIDA: {traceback.format_exc()}")
+        return {"error": str(e)}, 400
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
