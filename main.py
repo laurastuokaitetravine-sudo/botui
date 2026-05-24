@@ -64,7 +64,16 @@ def webhook():
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
-        ticker = exchange.fetch_ticker(symbol)
+        
+        # --- KLAIDOS TAISYMAS (NetworkError apėjimas) ---
+        # Naudojame alternatyvų, saugesnį MEXC API kelią kainai gauti
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+        except ccxt.NetworkError:
+            # Jei MEXC atmeta senuoju adresu, griebiame kainą tiesiai iš bendro sąrašo
+            all_tickers = exchange.fetch_tickers([symbol])
+            ticker = all_tickers[symbol]
+        # ------------------------------------------------
         
         # Pariekiame parametrus priklausomai nuo krypties
         # Kadangi tai MARKET orderis, entry_price naudojame tik matematiniam SL/TP skaičiavimui
