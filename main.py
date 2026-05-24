@@ -100,13 +100,13 @@ def webhook():
 
         # 3. Matematika abiem kryptims (0.8% pelno fiksavimas)
         if action == 'long':
-            tp_price = entry_price * 1.008
+            tp_price = entry_price * 1.004
             if sl_price is None or sl_price >= entry_price:
                 sl_price = entry_price * 0.99  # Atsarginis SL (1%), jei indikatorius klaidingas
             # Pusės atstumo taisyklė tavo SL korekcijai
             sl_price = entry_price - ((entry_price - sl_price) / 2)
         else:  # short
-            tp_price = entry_price * 0.992
+            tp_price = entry_price * 0.996
             if sl_price is None or sl_price <= entry_price:
                 sl_price = entry_price * 1.01  # Atsarginis SL (1%), jei indikatorius klaidingas
             # Pusės atstumo taisyklė tavo SL korekcijai
