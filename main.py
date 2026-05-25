@@ -6,20 +6,16 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- MEXC KONFIGŪRACIJA SU TEISINGAIS ENDPOINTAIS ---
+# --- SUTVARKYTA MEXC KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
+    'enableRateLimit': True,  # Svarbu: apsaugo nuo IP blokavimo (Rate Limit)
     'options': {
-        'defaultType': 'swap',
+        'defaultType': 'swap',  # CCXT pati automatiškai parinks teisingus Futures URL
         'createMarketBuyOrderRequiresPrice': False
-    },
-    'urls': {
-        'api': {
-            'public': 'https://contract.mexc.com/api',
-            'private': 'https://contract.mexc.com/api'
-        }
     }
+    # IŠTRINTA rankinė 'urls' konfigūracija, kuri kėlė NetworkError klaidą
 })
 
 MY_PASSWORD = "OrtofonG"
@@ -50,17 +46,29 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
+        # Suformatuojame porą pagal CCXT standartą Perpetual ateities sandoriams
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         symbol = f"{clean_ticker}/USDT:USDT"
 
+        # Užkrauname rinkas (vykdoma vieną kartą atmintyje, jei paleista ilgam)
         markets = exchange.load_markets()
         if symbol not in markets:
-            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
+            return {"error": f"Symbol {symbol} not found on MEXC Futures"}, 400
 
         market = markets[symbol]
 
-        # --- TIKSLUS TICKERIS BE NetworkError ---
-        ticker = exchange.fetch_ticker(symbol)
+        # --- TICKERIO GAVIMAS SU ATSARGINE TINKLO KLAIDŲ APSAUGA ---
+        ticker = None
+        for _ in range(3):  # Jei įvyks tinklo sutrikimas, bandys iki 3 kartų
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                break
+            except ccxt.NetworkError as ne:
+                print(f"Laikinai nepavyko pasiekti MEXC tinklo, bandoma vėl... Klaida: {ne}")
+                exchange.sleep(1000)  # palaukiame 1 sekundę prieš pakartojimą
+        
+        if not ticker:
+            return {"error": f"Nepavyko gauti kainos iš MEXC dėl tinklo sutrikimų."}, 502
 
         if action == 'long':
             entry_price = float(ticker['bid'])
@@ -80,13 +88,14 @@ def webhook():
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
 
+        # Nustatome sverto dydį
         try:
             exchange.set_leverage(int(final_leverage), symbol, {
                 'openType': 1,
                 'positionType': pos_mode
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Sverto nustatymo pranešimas (gali būti jau nustatytas): {e}")
 
         raw_sl = data.get('sl_price')
         sl_price = None
@@ -97,7 +106,7 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- TAVO ORIGINALI TP/SL LOGIKA (NEKEISTA) ---
+        # --- JŪSŲ ORIGINALI TP/SL LOGIKA (NEKEISTA) ---
         if action == 'long':
             tp_price = entry_price * 1.008
             if sl_price is None or sl_price >= entry_price:
@@ -109,10 +118,12 @@ def webhook():
                 sl_price = entry_price * 1.01
             sl_price = entry_price + ((sl_price - entry_price) / 2)
 
+        # Kainų pritaikymas biržos tikslumui (Precision)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
+        # Kiekio (contracts) skaičiavimas pagal svertą ir maržą
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
@@ -124,6 +135,7 @@ def webhook():
         
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
+        # Užsakymo parametrai MEXC Futures platformai
         params = {
             'posSide': pos_side,
             'openType': 1,
@@ -135,6 +147,7 @@ def webhook():
             'priceWay': 1
         }
 
+        # Market pozicijos atidarymas
         order = exchange.create_order(
             symbol=symbol,
             type='market',
