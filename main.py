@@ -10,12 +10,11 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,  # Svarbu: apsaugo nuo IP blokavimo (Rate Limit)
+    'enableRateLimit': True,  # Apsaugo nuo IP blokavimo (Rate Limit)
     'options': {
-        'defaultType': 'swap',  # CCXT pati automatiškai parinks teisingus Futures URL
+        'defaultType': 'swap',  # Automatiškai parenka teisingus Futures URL
         'createMarketBuyOrderRequiresPrice': False
     }
-    # IŠTRINTA rankinė 'urls' konfigūracija, kuri kėlė NetworkError klaidą
 })
 
 MY_PASSWORD = "OrtofonG"
@@ -29,15 +28,17 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        # Nuskaitymas ir JSON validacija
         data = request.get_json(force=True, silent=True)
-        
         if not data:
             raw_data = request.data.decode('utf-8').strip()
             data = json.loads(raw_data)
 
+        # Saugumo patikra
         if data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
+        # Veiksmo validacija
         action = str(data.get('action', '')).lower()
         if action not in ['long', 'short']:
             return f"Ignored (Invalid action: {action})", 200
@@ -46,41 +47,47 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
-        # Suformatuojame porą pagal CCXT standartą Perpetual ateities sandoriams
-        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        # --- 1. SIMBOLIO VALYMAS IR FORMATAVIMAS ---
+        clean_ticker = str(tv_ticker).upper().replace(".P", "").replace("_", "").replace("-", "")
+        if clean_ticker.endswith("USDT"):
+            clean_ticker = clean_ticker[:-4]
+        
         symbol = f"{clean_ticker}/USDT:USDT"
+        print(f"Gautas iš TradingView: {tv_ticker} -> Suformatuotas CCXT simbolis: {symbol}")
 
-        # Užkrauname rinkas (vykdoma vieną kartą atmintyje, jei paleista ilgam)
+        # Užkrauname rinkas iš biržos
         markets = exchange.load_markets()
         if symbol not in markets:
             return {"error": f"Symbol {symbol} not found on MEXC Futures"}, 400
 
         market = markets[symbol]
 
-        # --- TICKERIO GAVIMAS SU ATSARGINE TINKLO KLAIDŲ APSAUGA ---
-        ticker = None
+        # --- 2. STABILUS KAINOS GAVIMAS PER ORDER BOOK ---
+        order_book = None
         for _ in range(3):  # Jei įvyks tinklo sutrikimas, bandys iki 3 kartų
             try:
-                ticker = exchange.fetch_ticker(symbol)
+                order_book = exchange.fetch_order_book(symbol, limit=5)
                 break
             except ccxt.NetworkError as ne:
                 print(f"Laikinai nepavyko pasiekti MEXC tinklo, bandoma vėl... Klaida: {ne}")
                 exchange.sleep(1000)  # palaukiame 1 sekundę prieš pakartojimą
         
-        if not ticker:
-            return {"error": f"Nepavyko gauti kainos iš MEXC dėl tinklo sutrikimų."}, 502
+        if not order_book or not order_book['bids'] or not order_book['asks']:
+            return {"error": f"Nepavyko gauti Order Book kainos iš MEXC dėl tinklo sutrikimų."}, 502
 
+        # Nustatome pirkimo/pardavimo kainas ir režimus
         if action == 'long':
-            entry_price = float(ticker['bid'])
+            entry_price = float(order_book['bids'][0][0])  # Geriausia pirkimo kaina
             side = 'buy'
             pos_side = 'LONG'
             pos_mode = 1
         else:
-            entry_price = float(ticker['ask'])
+            entry_price = float(order_book['asks'][0][0])  # Geriausia pardavimo kaina
             side = 'sell'
             pos_side = 'SHORT'
             pos_mode = 2
         
+        # Maksimalaus leistino sverto patikra
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
@@ -88,7 +95,7 @@ def webhook():
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
 
-        # Nustatome sverto dydį
+        # Nustatome sverto dydį biržoje
         try:
             exchange.set_leverage(int(final_leverage), symbol, {
                 'openType': 1,
@@ -97,16 +104,16 @@ def webhook():
         except Exception as e:
             print(f"Sverto nustatymo pranešimas (gali būti jau nustatytas): {e}")
 
+        # SL kainos nuskaitymas iš TradingView
         raw_sl = data.get('sl_price')
         sl_price = None
-        
         if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
             try:
                 sl_price = float(raw_sl)
             except ValueError:
                 sl_price = None
 
-        # --- JŪSŲ ORIGINALI TP/SL LOGIKA (NEKEISTA) ---
+        # --- 3. TP/SL MATEMATINĖ LOGIKA ---
         if action == 'long':
             tp_price = entry_price * 1.008
             if sl_price is None or sl_price >= entry_price:
@@ -123,7 +130,7 @@ def webhook():
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # Kiekio (contracts) skaičiavimas pagal svertą ir maržą
+        # --- 4. KIEKIO SKAIČIAVIMAS IR UŽSAKYMAS ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         
@@ -147,7 +154,7 @@ def webhook():
             'priceWay': 1
         }
 
-        # Market pozicijos atidarymas
+        # Pozicijos atidarymas
         order = exchange.create_order(
             symbol=symbol,
             type='market',
@@ -158,13 +165,13 @@ def webhook():
         )
 
         print(f"{pos_side} MARKET sandoris įvykdytas | {symbol} | SL={sl_price} | TP={tp_price}")
-
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
 
+# --- SERVERIO PALEIDIMAS ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
