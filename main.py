@@ -113,17 +113,6 @@ def webhook():
             except ValueError:
                 sl_price = None
 
-        # --- 3. TP/SL MATEMATINĖ LOGIKA ---
-        if action == 'long':
-            tp_price = entry_price * 1.008
-            if sl_price is None or sl_price >= entry_price:
-                sl_price = entry_price * 0.99
-            sl_price = entry_price - ((entry_price - sl_price) / 2)
-        else:
-            tp_price = entry_price * 0.992
-            if sl_price is None or sl_price <= entry_price:
-                sl_price = entry_price * 1.01
-            sl_price = entry_price + ((sl_price - entry_price) / 2)
 
         # Kainų pritaikymas biržos tikslumui (Precision)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
