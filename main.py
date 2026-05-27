@@ -23,7 +23,7 @@ MARGIN_USDT = 25.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE", 200
+    return "BOTAS ONLINE (TIK SHORT | NAUDOJA TV STOPUS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -38,10 +38,10 @@ def webhook():
         if data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
         
-        # Veiksmo validacija
+        # Veiksmo validacija (Griežtai TIK short)
         action = str(data.get('action', '')).lower()
-        if action not in ['long', 'short']:
-            return f"Ignored (Invalid action: {action})", 200
+        if action != 'short':
+            return f"Ignored (Bot is in ALWAYS SHORT mode. Received: {action})", 200
 
         tv_ticker = data.get('ticker')
         if not tv_ticker:
@@ -72,20 +72,14 @@ def webhook():
                 print(f"Laikinai nepavyko pasiekti MEXC tinklo, bandoma vėl... Klaida: {ne}")
                 exchange.sleep(1000)  # palaukiame 1 sekundę prieš pakartojimą
         
-        if not order_book or not order_book['bids'] or not order_book['asks']:
+        if not order_book or not order_book['asks']:
             return {"error": f"Nepavyko gauti Order Book kainos iš MEXC dėl tinklo sutrikimų."}, 502
 
-        # Nustatome pirkimo/pardavimo kainas ir režimus
-        if action == 'long':
-            entry_price = float(order_book['bids'][0][0])  # Geriausia pirkimo kaina
-            side = 'buy'
-            pos_side = 'LONG'
-            pos_mode = 1
-        else:
-            entry_price = float(order_book['asks'][0][0])  # Geriausia pardavimo kaina
-            side = 'sell'
-            pos_side = 'SHORT'
-            pos_mode = 2
+        # Visada SHORT parametrai
+        entry_price = float(order_book['asks'][0][0])  # Geriausia pardavimo kaina
+        side = 'sell'
+        pos_side = 'SHORT'
+        pos_mode = 2
         
         # Maksimalaus leistino sverto patikra
         max_leverage = DEFAULT_LEVERAGE
@@ -102,17 +96,20 @@ def webhook():
                 'positionType': pos_mode
             })
         except Exception as e:
-            print(f"Sverto nustatymo pranešimas (gali būti jau nustatytas): {e}")
+            print(f"Sverto nustatymo pranešimas: {e}")
 
-        # SL kainos nuskaitymas iš TradingView
+        # --- 3. TP/SL NUSKAITYMAS IR VALIDACIJA IŠ TRADINGVIEW ---
         raw_sl = data.get('sl_price')
-        sl_price = None
-        if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
-            try:
-                sl_price = float(raw_sl)
-            except ValueError:
-                sl_price = None
+        raw_tp = data.get('tp_price')
 
+        if not raw_sl or not raw_tp:
+            return {"error": "TradingView pranešime trūksta 'tp_price' arba 'sl_price'"}, 400
+
+        try:
+            sl_price = float(raw_sl)
+            tp_price = float(raw_tp)
+        except ValueError:
+            return {"error": "Atsiųstos SL/TP kainos nėra teisingi skaičiai"}, 400
 
         # Kainų pritaikymas biržos tikslumui (Precision)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
@@ -127,20 +124,19 @@ def webhook():
         contracts_qty = raw_crypto_amount / contract_size
         
         min_contracts = float(market['limits']['amount']['min'])
-        final_contracts = max(contracts_qty, min_contracts)
         
-        amount = float(exchange.amount_to_precision(symbol, final_contracts))
+        # Apsauga: jei biudžeto neužtenka minimaliam kontraktui, atmetame sandorį
+        if contracts_qty < min_contracts:
+            return {"error": f"Nepakanka maržos. Reikia min {min_contracts} kontraktų, apskaičiuota {contracts_qty:.4f}"}, 400
+            
+        amount = float(exchange.amount_to_precision(symbol, contracts_qty))
 
-        # Užsakymo parametrai MEXC Futures platformai
+        # Užsakymo parametrai MEXC Futures platformai (Pašalinti besidubliuojantys kintamieji)
         params = {
             'posSide': pos_side,
             'openType': 1,
-            'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
-            'tpPrice': tp_price,
-            'slPrice': sl_price,
-            'priceWay': 1
+            'takeProfitPrice': tp_price
         }
 
         # Pozicijos atidarymas
