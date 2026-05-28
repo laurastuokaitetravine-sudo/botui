@@ -7,15 +7,24 @@ import ccxt
 app = Flask(__name__)
 
 # --- MEXC KONFIGŪRACIJA ---
+# Naudojame ://mexc.com domeną, kad išvengtume NetworkError
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
     'enableRateLimit': True,
+    'hostname': '://mexc.com',  # Svarbu: Perjungia į Futures API klasterį
     'options': {
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
     }
 })
+
+# Papildoma apsauga: Jei jūsų serveris yra AWS/DigitalOcean, MEXC gali blokuoti IP.
+# Jei turite proxy, atkomentuokite šias eilutes:
+# exchange.proxies = {
+#     'http': 'http://jusu_proxy_ip:port',
+#     'https': 'http://jusu_proxy_ip:port',
+# }
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 1
@@ -61,13 +70,18 @@ def webhook():
 
         # --- ENTRY KAINA ---
         order_book = exchange.fetch_order_book(symbol, limit=5)
-        entry_price = float(order_book['asks'][0][0])
+        # SHORT pozicijai rinkos kaina (Market Entry) aktyvuojasi per pirkėjų pusę (bids)
+        entry_price = float(order_book['bids'][0][0])
 
         # --- LEVERAGE ---
-        exchange.set_leverage(DEFAULT_LEVERAGE, symbol, {
-            'openType': 1,
-            'positionType': 2
-        })
+        # MEXC reikalauja nustatyti svertą prieš atidarant poziciją
+        try:
+            exchange.set_leverage(DEFAULT_LEVERAGE, symbol, {
+                'openType': 1, # 1 = Isolated, 2 = Cross
+                'positionType': 2 # 1 = Long, 2 = Short
+            })
+        except Exception as le:
+            print(f"Leverage nustatymo įspėjimas (gali būti jau nustatytas): {le}")
 
         # --- SL/TP iš TradingView ---
         def safe_float(v):
@@ -106,19 +120,19 @@ def webhook():
             amount = float(market['limits']['amount']['min'])
 
         # --- ATIDARYMAS ---
+        # MEXC API reikalauja 'stopLoss' struktūros trigger užsakymams sukurti kartu su rinkos orderiu
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': DEFAULT_LEVERAGE,
-            'stopLossPrice': sl_price,
-            'slPrice': sl_price,
-            'priceWay': 1
+            'stopLossPrice': sl_price, # Kai kurios CCXT versijos naudoja šį
+            'triggerPrice': sl_price,  # MEXC ateities sandorių aktyvavimo kaina
+            'priceWay': 1              # 1 = Last Price, 2 = Fair Price
         }
 
         order = exchange.create_order(
             symbol=symbol,
             type='market',
-            side='sell',
+            side='sell', # Sell atidaro SHORT poziciją
             amount=amount,
             price=None,
             params=open_params
@@ -135,13 +149,15 @@ def webhook():
         if leftover > 0:
             amt_tp3 = leftover
 
+        # Svarbu: Norint UŽDARYTI Short poziciją dalimis, params turi nurodyti, kad tai uždarymas
         tp_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': DEFAULT_LEVERAGE,
-            'priceWay': 1
+            'priceWay': 1,
+            'reduceOnly': True # Užtikrina, kad orderis tik mažins poziciją, o neatidarys LONG
         }
 
+        # SHORT pozicijos Take Profit uždaromi naudojant 'buy' (pirkimą)
         if amt_tp1 > 0:
             exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, tp_params)
             print(f"TP1 SET | {tp1_price} | {amt_tp1}")
