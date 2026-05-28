@@ -7,7 +7,7 @@ import ccxt
 app = Flask(__name__)
 
 # --- MEXC KONFIGŪRACIJA ---
-# Naudojame ://mexc.com domeną, kad išvengtume NetworkError
+# Naudojame ://mexc.com domeną, kad išvengtume NetworkError klaidų
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -18,13 +18,6 @@ exchange = ccxt.mexc({
         'createMarketBuyOrderRequiresPrice': False
     }
 })
-
-# Papildoma apsauga: Jei jūsų serveris yra AWS/DigitalOcean, MEXC gali blokuoti IP.
-# Jei turite proxy, atkomentuokite šias eilutes:
-# exchange.proxies = {
-#     'http': 'http://jusu_proxy_ip:port',
-#     'https': 'http://jusu_proxy_ip:port',
-# }
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 1
@@ -70,18 +63,16 @@ def webhook():
 
         # --- ENTRY KAINA ---
         order_book = exchange.fetch_order_book(symbol, limit=5)
-        # SHORT pozicijai rinkos kaina (Market Entry) aktyvuojasi per pirkėjų pusę (bids)
         entry_price = float(order_book['bids'][0][0])
 
         # --- LEVERAGE ---
-        # MEXC reikalauja nustatyti svertą prieš atidarant poziciją
         try:
             exchange.set_leverage(DEFAULT_LEVERAGE, symbol, {
-                'openType': 1, # 1 = Isolated, 2 = Cross
+                'openType': 1,   # 1 = Isolated, 2 = Cross
                 'positionType': 2 # 1 = Long, 2 = Short
             })
         except Exception as le:
-            print(f"Leverage nustatymo įspėjimas (gali būti jau nustatytas): {le}")
+            print(f"Leverage nustatymo įspėjimas: {le}")
 
         # --- SL/TP iš TradingView ---
         def safe_float(v):
@@ -119,26 +110,28 @@ def webhook():
         if amount < float(market['limits']['amount']['min']):
             amount = float(market['limits']['amount']['min'])
 
-        # --- ATIDARYMAS ---
-        # MEXC API reikalauja 'stopLoss' struktūros trigger užsakymams sukurti kartu su rinkos orderiu
+        # --- ATIDARYMAS (DABAR LIMIT) ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'stopLossPrice': sl_price, # Kai kurios CCXT versijos naudoja šį
-            'triggerPrice': sl_price,  # MEXC ateities sandorių aktyvavimo kaina
-            'priceWay': 1              # 1 = Last Price, 2 = Fair Price
+            'leverage': DEFAULT_LEVERAGE,
+            'stopLossPrice': sl_price,
+            'slPrice': sl_price,
+            'triggerPrice': sl_price,  # Papildomas parametras MEXC triggeriui
+            'priceWay': 1
         }
 
+        # create_order pakeistas į 'limit' tipo užsakymą su nurodyta entry_price
         order = exchange.create_order(
             symbol=symbol,
-            type='market',
-            side='sell', # Sell atidaro SHORT poziciją
+            type='limit',          # Pakeista į LIMIT
+            side='sell',           # Sell atidaro SHORT poziciją
             amount=amount,
-            price=None,
+            price=entry_price,     # Tiksli įėjimo kaina iš orderbook
             params=open_params
         )
 
-        print(f"SHORT OPEN | {symbol} | Qty={amount} | SL={sl_price}")
+        print(f"SHORT LIMIT OPEN | {symbol} | Price={entry_price} | Qty={amount} | SL={sl_price}")
 
         # --- TP ORDERIAI ---
         amt_tp1 = float(exchange.amount_to_precision(symbol, amount * 0.70))
@@ -149,15 +142,15 @@ def webhook():
         if leftover > 0:
             amt_tp3 = leftover
 
-        # Svarbu: Norint UŽDARYTI Short poziciją dalimis, params turi nurodyti, kad tai uždarymas
+        # Svarbu: 'reduceOnly' pašalintas, kad MEXC priimtų TP užsakymus, 
+        # kol pagrindinis Limit orderis dar stovi eilėje (knygoje)
         tp_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'priceWay': 1,
-            'reduceOnly': True # Užtikrina, kad orderis tik mažins poziciją, o neatidarys LONG
+            'leverage': DEFAULT_LEVERAGE,
+            'priceWay': 1
         }
 
-        # SHORT pozicijos Take Profit uždaromi naudojant 'buy' (pirkimą)
         if amt_tp1 > 0:
             exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, tp_params)
             print(f"TP1 SET | {tp1_price} | {amt_tp1}")
