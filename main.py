@@ -6,13 +6,13 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- SUTVARKYTA MEXC KONFIGŪRACIJA ---
+# --- MEXC KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,  # Apsaugo nuo IP blokavimo
+    'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # Automatiškai parenka Futures URL
+        'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
     }
 })
@@ -28,140 +28,137 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Nuskaitymas ir JSON validacija
+        # --- JSON NUSKAITYMAS ---
         data = request.get_json(force=True, silent=True)
         if not data:
-            raw_data = request.data.decode('utf-8').strip()
-            data = json.loads(raw_data)
+            data = json.loads(request.data.decode('utf-8').strip())
 
-        # Saugumo patikra
+        # --- SAUGUMAS ---
         if data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-        
-        # Veiksmo validacija (Priimame TIK short)
-        action = str(data.get('action', '')).lower()
-        if action != 'short':
-            return f"Ignored (Bot is in SHORT-ONLY mode. Received: {action})", 200
 
+        # --- TIK SHORT ---
+        if str(data.get('action', '')).lower() != 'short':
+            return "Ignored (SHORT only mode)", 200
+
+        # --- TICKER ---
         tv_ticker = data.get('ticker')
         if not tv_ticker:
-            return {"error": "Missing ticker in request"}, 400
+            return {"error": "Missing ticker"}, 400
 
-        # --- 1. SIMBOLIO VALYMAS IR FORMATAVIMAS ---
-        clean_ticker = str(tv_ticker).upper().replace(".P", "").replace("_", "").replace("-", "")
-        if clean_ticker.endswith("USDT"):
-            clean_ticker = clean_ticker[:-4]
-        
-        symbol = f"{clean_ticker}/USDT:USDT"
-        print(f"Gautas iš TradingView: {tv_ticker} -> Suformatuotas CCXT simbolis: {symbol}")
+        clean = tv_ticker.upper().replace(".P", "").replace("_", "").replace("-", "")
+        if clean.endswith("USDT"):
+            clean = clean[:-4]
 
-        # Užkrauname rinkas iš biržos
+        symbol = f"{clean}/USDT:USDT"
+        print(f"TV: {tv_ticker} -> CCXT: {symbol}")
+
         markets = exchange.load_markets()
         if symbol not in markets:
-            return {"error": f"Symbol {symbol} not found on MEXC Futures"}, 400
+            return {"error": f"Symbol {symbol} not found"}, 400
 
         market = markets[symbol]
 
-        # --- 2. STABILUS KAINOS GAVIMAS PER ORDER BOOK ---
-        order_book = None
-        for _ in range(3):
-            try:
-                order_book = exchange.fetch_order_book(symbol, limit=5)
-                break
-            except ccxt.NetworkError as ne:
-                print(f"Laikinai nepavyko pasiekti MEXC, bandoma vėl... Klaida: {ne}")
-                exchange.sleep(1000)
-        
-        if not order_book or not order_book['asks']:
-            return {"error": "Nepavyko gauti Order Book kainos iš MEXC."}, 502
-
-        # TIK SHORT: Naudojama geriausia pardavimo kaina (Asks)
+        # --- ENTRY KAINA ---
+        order_book = exchange.fetch_order_book(symbol, limit=5)
         entry_price = float(order_book['asks'][0][0])
-        side = 'sell'
-        pos_side = 'SHORT'
-        pos_mode = 2
-        
-        # Maksimalaus leistino sverto patikra
-        max_leverage = DEFAULT_LEVERAGE
-        if 'limits' in market and 'leverage' in market['limits']:
-            if market['limits']['leverage']['max'] is not None:
-                max_leverage = int(market['limits']['leverage']['max'])
 
-        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
+        # --- LEVERAGE ---
+        exchange.set_leverage(DEFAULT_LEVERAGE, symbol, {
+            'openType': 1,
+            'positionType': 2
+        })
 
-        # Nustatome sverto dydį biržoje
-        try:
-            exchange.set_leverage(int(final_leverage), symbol, {
-                'openType': 1, # Isolated
-                'positionType': pos_mode
-            })
-        except Exception as e:
-            print(f"Sverto nustatymo pranešimas: {e}")
+        # --- SL/TP iš TradingView ---
+        def safe_float(v):
+            return float(v) if v not in [None, "", "null", "nan", "na"] else None
 
-        # SL kainos nuskaitymas iš TradingView
-        raw_sl = data.get('sl_price')
-        sl_price = None
-        if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
-            try:
-                sl_price = float(raw_sl)
-            except ValueError:
-                sl_price = None
+        sl_price  = safe_float(data.get('sl_price'))
+        tp1_price = safe_float(data.get('tp1_price'))
+        tp2_price = safe_float(data.get('tp2_price'))
+        tp3_price = safe_float(data.get('tp3_price'))
 
-        # --- 3. TIK SHORT TP/SL MATEMATINĖ LOGIKA ---
-        tp_price = entry_price * 0.990  # Pelno fiksavimas ties -0.8% krentant žemyn
-        
-        if sl_price is None or sl_price <= entry_price:
-            sl_price = entry_price * 1.01  # Numatytasis SL +1%
-            
-        # Sumažiname SL riziką per pusę pagal jūsų buvusią logiką
-        sl_price = entry_price + ((sl_price - entry_price) / 2)
+        # --- SL PRIVALO ATEITI IŠ TV ---
+        if sl_price is None:
+            return {"error": "TradingView did not send SL (plot_0)"}, 400
 
-        # Kainų pritaikymas biržos tikslumui
+        # --- TP fallback tik jei TV nesiunčia ---
+        if tp1_price is None: tp1_price = entry_price * 0.990
+        if tp2_price is None: tp2_price = entry_price * 0.980
+        if tp3_price is None: tp3_price = entry_price * 0.970
+
+        # --- PRECISION ---
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
-        sl_price = float(exchange.price_to_precision(symbol, sl_price))
-        tp_price = float(exchange.price_to_precision(symbol, tp_price))
+        sl_price    = float(exchange.price_to_precision(symbol, sl_price))
+        tp1_price   = float(exchange.price_to_precision(symbol, tp1_price))
+        tp2_price   = float(exchange.price_to_precision(symbol, tp2_price))
+        tp3_price   = float(exchange.price_to_precision(symbol, tp3_price))
 
-        # --- 4. KIEKIO SKAIČIAVIMAS IR APVALINIMAS ---
-        total_value = MARGIN_USDT * final_leverage
-        raw_crypto_amount = total_value / entry_price
-        
+        # --- KIEKIS ---
+        total_value = MARGIN_USDT * DEFAULT_LEVERAGE
+        raw_amount = total_value / entry_price
+
         contract_size = float(market.get('contractSize', 1.0))
-        contracts_qty = raw_crypto_amount / contract_size
-        
-        amount = float(exchange.amount_to_precision(symbol, contracts_qty))
-        min_contracts = float(market['limits']['amount']['min'])
-        if amount < min_contracts:
-            amount = min_contracts
+        contracts_qty = raw_amount / contract_size
 
-        # Užsakymo parametrai MEXC Futures platformai
-        params = {
-            'posSide': pos_side,
-            'openType': 1, # Isolated
-            'leverage': int(final_leverage),
+        amount = float(exchange.amount_to_precision(symbol, contracts_qty))
+        if amount < float(market['limits']['amount']['min']):
+            amount = float(market['limits']['amount']['min'])
+
+        # --- ATIDARYMAS ---
+        open_params = {
+            'posSide': 'SHORT',
+            'openType': 1,
+            'leverage': DEFAULT_LEVERAGE,
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
-            'tpPrice': tp_price,
             'slPrice': sl_price,
             'priceWay': 1
         }
 
-        # Pozicijos atidarymas
         order = exchange.create_order(
             symbol=symbol,
             type='market',
-            side=side,
+            side='sell',
             amount=amount,
             price=None,
-            params=params
+            params=open_params
         )
 
-        print(f"SHORT MARKET sandoris įvykdytas | {symbol} | Kiekis: {amount} | SL={sl_price} | TP={tp_price}")
-        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+        print(f"SHORT OPEN | {symbol} | Qty={amount} | SL={sl_price}")
+
+        # --- TP ORDERIAI ---
+        amt_tp1 = float(exchange.amount_to_precision(symbol, amount * 0.70))
+        amt_tp2 = float(exchange.amount_to_precision(symbol, amount * 0.20))
+        amt_tp3 = float(exchange.amount_to_precision(symbol, amount * 0.10))
+
+        leftover = float(exchange.amount_to_precision(symbol, amount - (amt_tp1 + amt_tp2)))
+        if leftover > 0:
+            amt_tp3 = leftover
+
+        tp_params = {
+            'posSide': 'SHORT',
+            'openType': 1,
+            'leverage': DEFAULT_LEVERAGE,
+            'priceWay': 1
+        }
+
+        if amt_tp1 > 0:
+            exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, tp_params)
+            print(f"TP1 SET | {tp1_price} | {amt_tp1}")
+
+        if amt_tp2 > 0:
+            exchange.create_order(symbol, 'limit', 'buy', amt_tp2, tp2_price, tp_params)
+            print(f"TP2 SET | {tp2_price} | {amt_tp2}")
+
+        if amt_tp3 > 0:
+            exchange.create_order(symbol, 'limit', 'buy', amt_tp3, tp3_price, tp_params)
+            print(f"TP3 SET | {tp3_price} | {amt_tp3}")
+
+        return {"status": "success", "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
