@@ -7,7 +7,6 @@ import ccxt
 app = Flask(__name__)
 
 # --- MEXC KONFIGŪRACIJA ---
-# Naudojame ://mexc.com domeną, kad išvengtume NetworkError klaidų
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -61,13 +60,25 @@ def webhook():
 
         market = markets[symbol]
 
+        # --- DINAMINIS SVERTO APRIBOROJIMAS ---
+        # Nuskaitome biržos limitus. Jei jų nėra, naudojame saugų fallback variantą.
+        max_exchange_leverage = 20  # Standartinis fallback altcoinams
+        if 'limits' in market and 'leverage' in market['limits']:
+            max_exchange_leverage = float(market['limits']['leverage'].get('max', 20))
+        elif 'info' in market and 'maxLeverage' in market['info']:
+            max_exchange_leverage = float(market['info']['maxLeverage'])
+
+        # Parenkame mažesnį svertą: arba mūsų numatytąjį, arba maksimalų biržos leidžiamą
+        active_leverage = int(min(DEFAULT_LEVERAGE, max_exchange_leverage))
+        print(f"Pasirinktas svertas {symbol}: {active_leverage}x (Maksimalus biržos limitas: {max_exchange_leverage}x)")
+
         # --- ENTRY KAINA ---
         order_book = exchange.fetch_order_book(symbol, limit=5)
         entry_price = float(order_book['bids'][0][0])
 
-        # --- LEVERAGE ---
+        # --- LEVERAGE NUSTATYMAS ---
         try:
-            exchange.set_leverage(DEFAULT_LEVERAGE, symbol, {
+            exchange.set_leverage(active_leverage, symbol, {
                 'openType': 1,   # 1 = Isolated, 2 = Cross
                 'positionType': 2 # 1 = Long, 2 = Short
             })
@@ -99,8 +110,8 @@ def webhook():
         tp2_price   = float(exchange.price_to_precision(symbol, tp2_price))
         tp3_price   = float(exchange.price_to_precision(symbol, tp3_price))
 
-        # --- KIEKIS ---
-        total_value = MARGIN_USDT * DEFAULT_LEVERAGE
+        # --- KIEKIS (Naudoja aktyvų svertą) ---
+        total_value = MARGIN_USDT * active_leverage
         raw_amount = total_value / entry_price
 
         contract_size = float(market.get('contractSize', 1.0))
@@ -110,24 +121,23 @@ def webhook():
         if amount < float(market['limits']['amount']['min']):
             amount = float(market['limits']['amount']['min'])
 
-        # --- ATIDARYMAS (DABAR LIMIT) ---
+        # --- ATIDARYMAS ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': DEFAULT_LEVERAGE,
+            'leverage': active_leverage,  # Pataisyta: čia dabar siunčiamas saugus svertas
             'stopLossPrice': sl_price,
             'slPrice': sl_price,
-            'triggerPrice': sl_price,  # Papildomas parametras MEXC triggeriui
+            'triggerPrice': sl_price,
             'priceWay': 1
         }
 
-        # create_order pakeistas į 'limit' tipo užsakymą su nurodyta entry_price
         order = exchange.create_order(
             symbol=symbol,
-            type='limit',          # Pakeista į LIMIT
-            side='sell',           # Sell atidaro SHORT poziciją
+            type='limit',
+            side='sell',
             amount=amount,
-            price=entry_price,     # Tiksli įėjimo kaina iš orderbook
+            price=entry_price,
             params=open_params
         )
 
@@ -142,12 +152,10 @@ def webhook():
         if leftover > 0:
             amt_tp3 = leftover
 
-        # Svarbu: 'reduceOnly' pašalintas, kad MEXC priimtų TP užsakymus, 
-        # kol pagrindinis Limit orderis dar stovi eilėje (knygoje)
         tp_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': DEFAULT_LEVERAGE,
+            'leverage': active_leverage,  # Pataisyta: čia taip pat naudojamas saugus svertas
             'priceWay': 1
         }
 
