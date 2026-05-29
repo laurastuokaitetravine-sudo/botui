@@ -11,12 +11,14 @@ exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
     'enableRateLimit': True,
-    'hostname': '://mexc.com',  # Svarbu: Perjungia į Futures API klasterį
     'options': {
+        'defaultType': 'swap',                 # Naudojame Futures (USDT-M)
+        'createMarketBuyOrderRequiresPrice': False,
+        'defaultMarket': 'swap',               # Užtikrina, kad CCXT nenaudos spot API
         'defaultType': 'swap',
-        'createMarketBuyOrderRequiresPrice': False
     }
 })
+
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5
