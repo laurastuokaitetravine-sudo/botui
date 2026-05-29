@@ -19,8 +19,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25
-MARGIN_USDT = 30.0 
+DEFAULT_LEVERAGE = 5
+MARGIN_USDT = 5.0 
 
 @app.route('/')
 def home():
@@ -61,14 +61,12 @@ def webhook():
         market = markets[symbol]
 
         # --- DINAMINIS SVERTO APRIBOROJIMAS ---
-        # Nuskaitome biržos limitus. Jei jų nėra, naudojame saugų fallback variantą.
-        max_exchange_leverage = 20  # Standartinis fallback altcoinams
+        max_exchange_leverage = 20  
         if 'limits' in market and 'leverage' in market['limits']:
             max_exchange_leverage = float(market['limits']['leverage'].get('max', 20))
         elif 'info' in market and 'maxLeverage' in market['info']:
             max_exchange_leverage = float(market['info']['maxLeverage'])
 
-        # Parenkame mažesnį svertą: arba mūsų numatytąjį, arba maksimalų biržos leidžiamą
         active_leverage = int(min(DEFAULT_LEVERAGE, max_exchange_leverage))
         print(f"Pasirinktas svertas {symbol}: {active_leverage}x (Maksimalus biržos limitas: {max_exchange_leverage}x)")
 
@@ -79,8 +77,8 @@ def webhook():
         # --- LEVERAGE NUSTATYMAS ---
         try:
             exchange.set_leverage(active_leverage, symbol, {
-                'openType': 1,   # 1 = Isolated, 2 = Cross
-                'positionType': 2 # 1 = Long, 2 = Short
+                'openType': 1,   # 1 = Isolated
+                'positionType': 2 # 2 = Short
             })
         except Exception as le:
             print(f"Leverage nustatymo įspėjimas: {le}")
@@ -117,18 +115,19 @@ def webhook():
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_amount / contract_size
 
-        amount = float(exchange.amount_to_precision(symbol, contracts_qty))
-        if amount < float(market['limits']['amount']['min']):
-            amount = float(market['limits']['amount']['min'])
+        # Paverčiame bendrą kiekį į sveikąjį skaičių
+        amount = int(float(exchange.amount_to_precision(symbol, contracts_qty)))
+        min_amount = int(float(market['limits']['amount']['min'])) if market['limits']['amount']['min'] is not None else 1
+        if amount < min_amount:
+            amount = min_amount
 
         # --- ATIDARYMAS ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': active_leverage,  # Pataisyta: čia dabar siunčiamas saugus svertas
-            'stopLossPrice': sl_price,
+            'leverage': active_leverage,  
+            'stopLossPrice': sl_price,     
             'slPrice': sl_price,
-            'triggerPrice': sl_price,
             'priceWay': 1
         }
 
@@ -143,33 +142,45 @@ def webhook():
 
         print(f"SHORT LIMIT OPEN | {symbol} | Price={entry_price} | Qty={amount} | SL={sl_price}")
 
-        # --- TP ORDERIAI ---
-        amt_tp1 = float(exchange.amount_to_precision(symbol, amount * 0.70))
-        amt_tp2 = float(exchange.amount_to_precision(symbol, amount * 0.20))
-        amt_tp3 = float(exchange.amount_to_precision(symbol, amount * 0.10))
+        # --- SUTVARKYTI TP1, TP2, TP3 TRIGGER ORDERIAI ---
+        # 1. Preliminarus padalinimas dalimis
+        amt_tp1 = int(amount * 0.70)
+        amt_tp2 = int(amount * 0.20)
+        amt_tp3 = amount - (amt_tp1 + amt_tp2)
 
-        leftover = float(exchange.amount_to_precision(symbol, amount - (amt_tp1 + amt_tp2)))
-        if leftover > 0:
-            amt_tp3 = leftover
+        # 2. MECHANIZMAS NUO 'QUANTITY ERROR' KLAIDOS:
+        # Užtikriname, kad nei vienas TP užsakymas nebūtų mažesnis už biržos minimalų leistiną kontraktų kiekį
+        if amt_tp1 < min_amount and amt_tp1 > 0: amt_tp1 = min_amount
+        if amt_tp2 < min_amount and amt_tp2 > 0: amt_tp2 = min_amount
+        if amt_tp3 < min_amount and amt_tp3 > 0: amt_tp3 = min_amount
 
-        tp_params = {
+        tp_trigger_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': active_leverage,  # Pataisyta: čia taip pat naudojamas saugus svertas
-            'priceWay': 1
+            'leverage': active_leverage,
+            'priceWay': 1,
+            'orderType': 3,       # 3 = Sąlyginis/Trigger užsakymas MEXC API
+            'openClose': 'CLOSE'  # Nurodo biržai tik uždaryti SHORT poziciją
         }
 
+        # Išsiunčiame TP tik tada, kai apskaičiuotas kiekis yra saugus ir didesnis už 0
         if amt_tp1 > 0:
-            exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, tp_params)
-            print(f"TP1 SET | {tp1_price} | {amt_tp1}")
+            p1 = tp_trigger_params.copy()
+            p1['triggerPrice'] = tp1_price
+            exchange.create_order(symbol, 'market', 'buy', amt_tp1, None, p1)
+            print(f"TP1 TRIGGER SET | {tp1_price} | Qty={amt_tp1} (70%)")
 
         if amt_tp2 > 0:
-            exchange.create_order(symbol, 'limit', 'buy', amt_tp2, tp2_price, tp_params)
-            print(f"TP2 SET | {tp2_price} | {amt_tp2}")
+            p2 = tp_trigger_params.copy()
+            p2['triggerPrice'] = tp2_price
+            exchange.create_order(symbol, 'market', 'buy', amt_tp2, None, p2)
+            print(f"TP2 TRIGGER SET | {tp2_price} | Qty={amt_tp2} (20%)")
 
         if amt_tp3 > 0:
-            exchange.create_order(symbol, 'limit', 'buy', amt_tp3, tp3_price, tp_params)
-            print(f"TP3 SET | {tp3_price} | {amt_tp3}")
+            p3 = tp_trigger_params.copy()
+            p3['triggerPrice'] = tp3_price
+            exchange.create_order(symbol, 'market', 'buy', amt_tp3, None, p3)
+            print(f"TP3 TRIGGER SET | {tp3_price} | Qty={amt_tp3} (10%)")
 
         return {"status": "success", "order_id": order['id']}, 200
 
