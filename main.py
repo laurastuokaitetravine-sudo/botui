@@ -20,12 +20,12 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25
+DEFAULT_LEVERAGE = 10
 MARGIN_USDT = 1.0  # Jūsų bandomoji 1 USDT marža (25 USDT bendra pozicija)
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (SUTVARKYTAS MEXC TP/SL)", 200
+    return "BOTAS ONLINE (PILNAI SUTVARKYTI REIKALAUJAMI PARAMETRAI)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -80,7 +80,6 @@ def webhook():
         if not ticker:
             return {"error": "Nepavyko gauti kainos iš MEXC dėl tinklo sutrikimų."}, 502
 
-        # Paimame einamąją ASK (pardavimo) kainą iš fjučerių rinkos užsakymui
         entry_price = float(ticker['ask'])
 
         # --- SVERTO APRIBOROJIMAS ---
@@ -91,7 +90,7 @@ def webhook():
 
         active_leverage = int(min(DEFAULT_LEVERAGE, max_exchange_leverage))
 
-        # Nustatome svertą biržoje
+        # Nustatome svertą biržoje preliminaru skambučiu
         try:
             exchange.set_leverage(active_leverage, symbol, {
                 'openType': 1,   # Isolated
@@ -132,7 +131,6 @@ def webhook():
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_amount / contract_size
 
-        # Priverstinai paverčiame į sveikąjį skaičių (integer) dėl fjučerių kontraktų taisyklių
         amount = int(float(exchange.amount_to_precision(symbol, contracts_qty)))
         min_amount = int(float(market['limits']['amount']['min'])) if market['limits']['amount']['min'] is not None else 1
         
@@ -174,34 +172,34 @@ def webhook():
                 amt_tp2 += amt_tp3
                 amt_tp3 = 0
 
-        # --- 3. FIX: TIKSLUS TP/SL REGISTRAVIMAS MEXC FUTURES API v2 ---
+        # --- 3. FIX: SVERTAS REIKALAUJAMAS IR SĄLYGINIUOSE ORDERIUOSE ---
         
-        # --- A. STOP LOSS TRIGGERIS (Trigger-Market uždarymas) ---
+        # --- A. STOP LOSS TRIGGERIS ---
         sl_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'openClose': 'CLOSE',  # Privaloma: nurodo pozicijos uždarymą
-            'orderType': 3,        # 3 = Sąlyginis/Trigger Market užsakymas MEXC API
-            'triggerType': 1,      # 1 = Aktyvuojama pagal Mark Price
-            'stopPrice': sl_price
+            'openClose': 'close',
+            'orderType': 3,        # 3 = Sąlyginis Market užsakymas
+            'triggerType': 1,      # 1 = Mark Price
+            'stopPrice': sl_price,
+            'leverage': int(active_leverage)  # PATAISYMAS: Pridėtas reikalaujamas svertas
         }
-        # Naudojame 'market' tipą, nes 'spotMarketOrder' MEXC fjučeriuose yra nevalidus
         exchange.create_order(symbol, 'market', 'buy', amount, None, sl_params)
         print(f"SL TRIGGER SET | Price={sl_price} | Qty={amount}")
 
-        # --- B. TAKE PROFIT TRIGGERIAI (Trigger-Limit uždarymas nemokamiems mokesčiams) ---
+        # --- B. TAKE PROFIT TRIGGERIAI (Trigger-Limit uždarymas) ---
         tp_limit_base = {
             'posSide': 'SHORT',
             'openType': 1,
-            'openClose': 'CLOSE',
-            'orderType': 4,        # 4 = Sąlyginis/Trigger Limit užsakymas MEXC API (Maker)
+            'openClose': 'close',
+            'orderType': 4,        # 4 = Sąlyginis Limit užsakymas (Maker)
             'triggerType': 1,      # 1 = Mark Price
+            'leverage': int(active_leverage)  # PATAISYMAS: Pridėtas reikalaujamas svertas
         }
 
         if amt_tp1 > 0:
             p1 = tp_limit_base.copy()
             p1['stopPrice'] = tp1_price
-            # Siunčiame 'limit', perduodame vykdymo kainą tp1_price ir parametrus
             exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, p1)
             print(f"TP1 LIMIT SET (MAKER) | Trigger/Price={tp1_price} | Qty={amt_tp1} (70%)")
 
