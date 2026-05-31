@@ -11,41 +11,32 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,                 # Apsaugo nuo IP blokavimo
+    'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',                 # Naudojame Futures (USDT-M)
+        'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False,
-        'defaultMarket': 'swap',               # Užtikrina, kad CCXT nenaudos spot API
+        'defaultMarket': 'swap',
     }
 })
 
-# OPTIMIZACIJA: Užkrauname rinkas į atmintį TIK VIENĄ KARTĄ paleidžiant serverį,
-# kad botas negaištų laiko gavęs realų TradingView signalą.
-try:
-    print("Kraunamos MEXC rinkos taisyklės...")
-    exchange.load_markets()
-    print("Rinkos sėkmingai užkrautos!")
-except Exception as me:
-    print(f"ĮSPĖJIMAS: Nepavyko iš anksto užkrauti rinkų, bus bandoma vėliau: {me}")
-
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25                        # Jūsų nustatytas svertas (25x)
-MARGIN_USDT = 5.0                            # Jūsų nustatyta marža (5 USDT)
+DEFAULT_LEVERAGE = 25
+MARGIN_USDT = 35.0  # Jūsų nustatyta 35 USDT marža
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (SUTVARKYTAS SVERTAS + MARKET ĮĖJIMAS)", 200
+    return "BOTAS ONLINE (MARKET REŽIMAS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # --- JSON NUSKAITYMAS SU ATSARGINE TEKSTO APDOROJIMO LOGIKA ---
+        # --- JSON NUSKAITYMAS SU APSAUGA ---
         raw_data = request.data.decode('utf-8').strip()
         try:
             data = json.loads(raw_data)
         except Exception as je:
-            print(f"KRITINĖ KLAIDA: Sugadintas JSON formatas iš TradingView! Gautas tekstas: {raw_data}")
-            return {"error": "Invalid JSON format. Check quotation marks."}, 400
+            print(f"KRITINĖ KLAIDA: Sugadintas JSON iš TradingView! Gautas tekstas: {raw_data}")
+            return {"error": "Invalid JSON format"}, 400
 
         # --- SAUGUMAS ---
         if data.get('passphrase') != MY_PASSWORD:
@@ -55,7 +46,7 @@ def webhook():
         if str(data.get('action', '')).lower() != 'short':
             return "Ignored (SHORT only mode)", 200
 
-        # --- TICKER (SAUGUS IR UNIVERSALUS PAVADINIMŲ TVARKYMAS) ---
+        # --- TICKER (PAVADINIMŲ VALYMAS) ---
         tv_ticker = data.get('ticker')
         if not tv_ticker:
             return {"error": "Missing ticker"}, 400
@@ -68,19 +59,17 @@ def webhook():
             
         symbol = f"{clean}/USDT:USDT"
 
-        # Naudojame jau atmintyje esančias rinkas (žaibiškas greitis)
-        if symbol not in exchange.markets:
-            # Jei nerandame, bandom atnaujinti atsargai
-            exchange.load_markets()
-            if symbol not in exchange.markets:
-                print(f"KLAIDA: Moneta {symbol} nerasta MEXC Futures sąraše.")
-                return {"error": f"Symbol {symbol} not found"}, 400
+        # --- SAUGUS RINKŲ KROVIMAS GAVUS SIGNALĄ (Apsaugo nuo 502) ---
+        markets = exchange.load_markets()
+        if symbol not in markets:
+            print(f"KLAIDA: Moneta {symbol} nerasta MEXC Futures sąraše.")
+            return {"error": f"Symbol {symbol} not found"}, 400
 
-        market = exchange.markets[symbol]
+        market = markets[symbol]
 
-        # --- TICKERIO GAVIMAS SU ATSARGINE TINKLO KLAIDŲ APSAUGA ---
+        # --- TINKLO KLAIDŲ APSAUGA KAINAI GAUTI ---
         ticker = None
-        for _ in range(3):  # Jei įvyks tinklo sutrikimas, bandys iki 3 kartų
+        for _ in range(3):
             try:
                 ticker = exchange.fetch_ticker(symbol)
                 break
@@ -102,11 +91,11 @@ def webhook():
 
         active_leverage = int(min(DEFAULT_LEVERAGE, max_exchange_leverage))
 
-        # --- PRELIMINARUS LEVERAGE NUSTATYMAS SERVERYJE ---
+        # Nustatome svertą biržoje
         try:
             exchange.set_leverage(active_leverage, symbol, {
-                'openType': 1,   # 1 = Isolated
-                'positionType': 2 # 2 = Short
+                'openType': 1,   # Isolated
+                'positionType': 2 # Short
             })
         except:
             pass
@@ -124,37 +113,37 @@ def webhook():
             print("KLAIDA: TradingView neatsiuntė Stop Loss kainos!")
             return {"error": "TradingView did not send SL (plot_0)"}, 400
 
-        # Fallback procentiniai tikslai tik jei TV netyčia atsiųstų tuščius TP (NaN)
-        if tp1_price is None: tp1_price = entry_price * 0.990
-        if tp2_price is None: tp2_price = entry_price * 0.980
-        if tp3_price is None: tp3_price = entry_price * 0.970
+        # Fallback procentiniai tikslai, jei TV netyčia atsiųstų tuščius TP (NaN)
+        if tp1_price is None: tp1_price = entry_price * 0.992
+        if tp2_price is None: tp2_price = entry_price * 0.985
+        if tp3_price is None: tp3_price = entry_price * 0.980
 
-        # --- PRECISION (SUVALINIMAS PAGAL BIRŽOS TAISYKLĖS) ---
+        # Suvaliname skaičius pagal biržos taisykles (Precision)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price    = float(exchange.price_to_precision(symbol, sl_price))
         tp1_price   = float(exchange.price_to_precision(symbol, tp1_price))
         tp2_price   = float(exchange.price_to_precision(symbol, tp2_price))
         tp3_price   = float(exchange.price_to_precision(symbol, tp3_price))
 
-        # --- KIEKIS IR KONTRAKTAI ---
+        # --- KIEKIO MATEMATIKA ---
         total_value = MARGIN_USDT * active_leverage
         raw_amount = total_value / entry_price
 
         contract_size = float(market.get('contractSize', 1.0))
         contracts_qty = raw_amount / contract_size
 
+        # Priverstinai paverčiame į sveikąjį skaičių (integer) dėl MEXC Futures taisyklių
         amount = int(float(exchange.amount_to_precision(symbol, contracts_qty)))
         min_amount = int(float(market['limits']['amount']['min'])) if market['limits']['amount']['min'] is not None else 1
         
-        # Apsauga nuo 0 kontraktų klaidos
         if amount < min_amount:
             amount = min_amount
 
         # --- ATIDARYMAS (MARKET ORDER) ---
         open_params = {
             'posSide': 'SHORT',
-            'openType': 1,              # 1 = Isolated
-            'leverage': int(active_leverage)  # Griežtai reikalaujama MEXC API
+            'openType': 1,              # Isolated
+            'leverage': int(active_leverage)
         }
 
         order = exchange.create_order(
@@ -170,6 +159,7 @@ def webhook():
         # --- APRAŠOME SL IR TP TRIGGERIUS ---
         min_amount = int(min_amount)
         
+        # Padaliname kiekį dalimis (70%, 20%, 10%)
         amt_tp1 = int(amount * 0.70)
         amt_tp2 = int(amount * 0.20)
         
@@ -209,19 +199,19 @@ def webhook():
             p1 = tp_limit_base.copy()
             p1['stopPrice'] = tp1_price
             exchange.create_order(symbol, 'limit', 'buy', amt_tp1, tp1_price, p1)
-            print(f"TP1 LIMIT SET (MAKER) | Trigger/Price={tp1_price} | Qty={amt_tp1} (70%)")
+            print(f"TP1 LIMIT SET (MAKER) | Trigger/Price={tp1_price} | Qty={amt_tp1}")
 
         if amt_tp2 > 0:
             p2 = tp_limit_base.copy()
             p2['stopPrice'] = tp2_price
             exchange.create_order(symbol, 'limit', 'buy', amt_tp2, tp2_price, p2)
-            print(f"TP2 LIMIT SET (MAKER) | Trigger/Price={tp2_price} | Qty={amt_tp2} (20%)")
+            print(f"TP2 LIMIT SET (MAKER) | Trigger/Price={tp2_price} | Qty={amt_tp2}")
 
         if amt_tp3 > 0:
             p3 = tp_limit_base.copy()
             p3['stopPrice'] = tp3_price
             exchange.create_order(symbol, 'limit', 'buy', amt_tp3, tp3_price, p3)
-            print(f"TP3 LIMIT SET (MAKER) | Trigger/Price={tp3_price} | Qty={amt_tp3} (Likutis)")
+            print(f"TP3 LIMIT SET (MAKER) | Trigger/Price={tp3_price} | Qty={amt_tp3}")
 
         print("Visi prekybos lygiai sėkmingai suregistruoti biržoje.")
         return {"status": "success", "order_id": order['id']}, 200
