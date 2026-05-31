@@ -21,7 +21,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25
-MARGIN_USDT = 35.0  # Jūsų nustatyta 35 USDT marža
+MARGIN_USDT = 1.0  # Jūsų nustatyta 35 USDT marža
 
 @app.route('/')
 def home():
