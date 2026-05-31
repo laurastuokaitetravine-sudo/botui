@@ -11,13 +11,22 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,                 # Apsaugo nuo IP blokavimo dėl per greitų užklausų
+    'enableRateLimit': True,                 # Apsaugo nuo IP blokavimo
     'options': {
         'defaultType': 'swap',                 # Naudojame Futures (USDT-M)
         'createMarketBuyOrderRequiresPrice': False,
         'defaultMarket': 'swap',               # Užtikrina, kad CCXT nenaudos spot API
     }
 })
+
+# OPTIMIZACIJA: Užkrauname rinkas į atmintį TIK VIENĄ KARTĄ paleidžiant serverį,
+# kad botas negaištų laiko gavęs realų TradingView signalą.
+try:
+    print("Kraunamos MEXC rinkos taisyklės...")
+    exchange.load_markets()
+    print("Rinkos sėkmingai užkrautos!")
+except Exception as me:
+    print(f"ĮSPĖJIMAS: Nepavyko iš anksto užkrauti rinkų, bus bandoma vėliau: {me}")
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25                        # Jūsų nustatytas svertas (25x)
@@ -53,18 +62,21 @@ def webhook():
 
         clean = tv_ticker.upper().replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         
-        # Saugiklis pigioms monetoms, kurios biržoje turi kitą tikerį
+        # Saugiklis pigioms monetoms
         if clean == "PEPE":
             clean = "10000PEPE"
             
         symbol = f"{clean}/USDT:USDT"
 
-        markets = exchange.load_markets()
-        if symbol not in markets:
-            print(f"KLAIDA: Moneta {symbol} nerasta MEXC Futures sąraše.")
-            return {"error": f"Symbol {symbol} not found"}, 400
+        # Naudojame jau atmintyje esančias rinkas (žaibiškas greitis)
+        if symbol not in exchange.markets:
+            # Jei nerandame, bandom atnaujinti atsargai
+            exchange.load_markets()
+            if symbol not in exchange.markets:
+                print(f"KLAIDA: Moneta {symbol} nerasta MEXC Futures sąraše.")
+                return {"error": f"Symbol {symbol} not found"}, 400
 
-        market = markets[symbol]
+        market = exchange.markets[symbol]
 
         # --- TICKERIO GAVIMAS SU ATSARGINE TINKLO KLAIDŲ APSAUGA ---
         ticker = None
@@ -138,11 +150,11 @@ def webhook():
         if amount < min_amount:
             amount = min_amount
 
-        # --- ATIDARYMAS (MARKET ORDER - SU SVERTO LAUKELIU PATAISYMUI) ---
+        # --- ATIDARYMAS (MARKET ORDER) ---
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,              # 1 = Isolated
-            'leverage': int(active_leverage)  # PATAISYMAS: Griežtai reikalaujama MEXC API fjučeriuose
+            'leverage': int(active_leverage)  # Griežtai reikalaujama MEXC API
         }
 
         order = exchange.create_order(
@@ -155,10 +167,9 @@ def webhook():
         )
         print(f"SHORT MARKET OPENED | {symbol} | Qty={amount} | Svertas={active_leverage}x")
 
-        # --- APRAŠOME SL IR TP TRIGGERIUS (VYKDOMI IŠKART PO MARKET ĮĖJIMO) ---
+        # --- APRAŠOME SL IR TP TRIGGERIUS ---
         min_amount = int(min_amount)
         
-        # Saugus kiekių padalinimas dalimis (70%, 20%, 10%)
         amt_tp1 = int(amount * 0.70)
         amt_tp2 = int(amount * 0.20)
         
@@ -186,7 +197,7 @@ def webhook():
         exchange.create_order(symbol, 'spotMarketOrder', 'buy', amount, None, sl_params)
         print(f"SL TRIGGER SET (TAKER) | Price={sl_price} | Qty={amount}")
 
-        # --- 2. TAKE PROFIT TRIGGER-LIMIT (MAKER - Sutaupome mokesčius) ---
+        # --- 2. TAKE PROFIT TRIGGER-LIMIT (MAKER) ---
         tp_limit_base = {
             'posSide': 'SHORT',
             'openType': 1,
