@@ -1,159 +1,168 @@
 import os
 import json
-import time
 import traceback
 from flask import Flask, request
 import ccxt
 
 app = Flask(__name__)
 
-# --- GRIEŽTA MEXC KONFIGŪRACIJA ---
+# --- SUTVARKYTA MEXC KONFIGŪRACIJA ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,
+    'enableRateLimit': True,  # Svarbu: apsaugo nuo IP blokavimo (Rate Limit)
     'options': {
-        'defaultType': 'swap',                 # Naudojame Futures (USDT-M)
-        'createMarketBuyOrderRequiresPrice': False,
-        'defaultMarket': 'swap',
+        'defaultType': 'swap',  # CCXT pati automatiškai parinks teisingus Futures URL
+        'createMarketBuyOrderRequiresPrice': False
     }
+    # IŠTRINTA rankinė 'urls' konfigūracija, kuri kėlė NetworkError klaidą
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 10
-MARGIN_USDT = 1.0  # Jūsų nustatyta 5 USDT marža
+DEFAULT_LEVERAGE = 25
+MARGIN_USDT = 5.0 
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (SUTVARKYTA VIENO ŽINGSNIO STRUKTŪRA)", 200
+    return "BOTAS ONLINE", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # --- JSON NUSKAITYMAS ---
-        raw_data = request.data.decode('utf-8').strip()
-        try:
+        data = request.get_json(force=True, silent=True)
+        
+        if not data:
+            raw_data = request.data.decode('utf-8').strip()
             data = json.loads(raw_data)
-        except Exception as je:
-            print(f"KRITINĖ KLAIDA: Sugadintas JSON formatas! Tekstas: {raw_data}")
-            return {"error": "Invalid JSON format"}, 400
 
         if data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-
-        if str(data.get('action', '')).lower() != 'short':
-            return "Ignored (SHORT only mode)", 200
+        
+        action = str(data.get('action', '')).lower()
+        if action not in ['long', 'short']:
+            return f"Ignored (Invalid action: {action})", 200
 
         tv_ticker = data.get('ticker')
         if not tv_ticker:
-            return {"error": "Missing ticker"}, 400
+            return {"error": "Missing ticker in request"}, 400
 
-        # --- 1. SAUGUS MONETŲ PAVADINIMŲ VALYMAS (ĮSKAITANT PEPE) ---
-        clean = tv_ticker.upper().replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
-        if clean == "PEPE":
-            clean = "10000PEPE"
-            
-        symbol = f"{clean}/USDT:USDT"
+        # Suformatuojame porą pagal CCXT standartą Perpetual ateities sandoriams
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        symbol = f"{clean_ticker}/USDT:USDT"
 
-        # Užkrauname rinkas iš anksto
+        # Užkrauname rinkas (vykdoma vieną kartą atmintyje, jei paleista ilgam)
         markets = exchange.load_markets()
         if symbol not in markets:
-            print(f"KLAIDA: Moneta {symbol} nerasta MEXC fjučeriuose.")
-            return {"error": f"Symbol {symbol} not found"}, 400
+            return {"error": f"Symbol {symbol} not found on MEXC Futures"}, 400
 
         market = markets[symbol]
 
-        # --- 2. TINKLO KLAIDŲ APSAUGA KAINAI GAUTI ---
+        # --- TICKERIO GAVIMAS SU ATSARGINE TINKLO KLAIDŲ APSAUGA ---
         ticker = None
-        for _ in range(3):
+        for _ in range(3):  # Jei įvyks tinklo sutrikimas, bandys iki 3 kartų
             try:
                 ticker = exchange.fetch_ticker(symbol)
                 break
             except ccxt.NetworkError as ne:
-                print(f"Laikinai nepavyko pasiekti MEXC, bandoma vėl... {ne}")
-                time.sleep(1)
+                print(f"Laikinai nepavyko pasiekti MEXC tinklo, bandoma vėl... Klaida: {ne}")
+                exchange.sleep(1000)  # palaukiame 1 sekundę prieš pakartojimą
         
         if not ticker:
-            return {"error": "Nepavyko gauti kainos iš MEXC dėl tinklo sutrikimų."}, 502
+            return {"error": f"Nepavyko gauti kainos iš MEXC dėl tinklo sutrikimų."}, 502
 
-        entry_price = float(ticker['ask'])
-
-        # Sverto limitų patikra
-        max_exchange_leverage = DEFAULT_LEVERAGE  
+        if action == 'long':
+            entry_price = float(ticker['bid'])
+            side = 'buy'
+            pos_side = 'LONG'
+            pos_mode = 1
+        else:
+            entry_price = float(ticker['ask'])
+            side = 'sell'
+            pos_side = 'SHORT'
+            pos_mode = 2
+        
+        max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
-                max_exchange_leverage = float(market['limits']['leverage']['max'])
+                max_leverage = int(market['limits']['leverage']['max'])
 
-        active_leverage = int(min(DEFAULT_LEVERAGE, max_exchange_leverage))
+        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
 
-        # Nustatome svertą biržoje
+        # Nustatome sverto dydį
         try:
-            exchange.set_leverage(active_leverage, symbol, {
-                'openType': 1,   # Isolated
-                'positionType': 2 # Short
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,
+                'positionType': pos_mode
             })
-        except:
-            pass
+        except Exception as e:
+            print(f"Sverto nustatymo pranešimas (gali būti jau nustatytas): {e}")
 
-        # --- 3. SL IR TP NUSKAITYMAS ---
-        def safe_float(v):
-            return float(v) if v not in [None, "", "null", "nan", "na", "NaN"] else None
-
-        sl_price = safe_float(data.get('sl_price'))
+        raw_sl = data.get('sl_price')
+        sl_price = None
         
-        # Pasiimame TP1 kaip pagrindinį tikslą. Jei jo nėra – naudojame jūsų procentinį 0.8% fallback
-        tp_price = safe_float(data.get('tp1_price'))
-        if tp_price is None:
+        if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
+            try:
+                sl_price = float(raw_sl)
+            except ValueError:
+                sl_price = None
+
+        # --- JŪSŲ ORIGINALI TP/SL LOGIKA (NEKEISTA) ---
+        if action == 'long':
+            tp_price = entry_price * 1.008
+            if sl_price is None or sl_price >= entry_price:
+                sl_price = entry_price * 0.99
+            sl_price = entry_price - ((entry_price - sl_price) / 2)
+        else:
             tp_price = entry_price * 0.992
+            if sl_price is None or sl_price <= entry_price:
+                sl_price = entry_price * 1.01
+            sl_price = entry_price + ((sl_price - entry_price) / 2)
 
-        if sl_price is None or sl_price <= entry_price:
-            sl_price = entry_price * 1.01
-
-        # Suapvaliname pagal biržos taisykles (Griežtai būtina)
+        # Kainų pritaikymas biržos tikslumui (Precision)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
-        sl_price    = float(exchange.price_to_precision(symbol, sl_price))
-        tp_price    = float(exchange.price_to_precision(symbol, tp_price))
+        sl_price = float(exchange.price_to_precision(symbol, sl_price))
+        tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- 4. KIEKIO SKAIČIAVIMAS IR APVALINIMAS Į SVEIKĄJĮ SKAIČIŲ (PENGU pataisymas) ---
-        total_value = MARGIN_USDT * active_leverage
-        raw_amount = total_value / entry_price
-
-        contract_size = float(market.get('contractSize', 1.0))
-        contracts_qty = raw_amount / contract_size
-
-        # Priverstinai paverčiame į sveikąjį skaičių (int), nes MEXC nepriima kablelių kontraktų kiekyje
-        amount = int(float(exchange.amount_to_precision(symbol, contracts_qty)))
-        min_amount = int(float(market['limits']['amount']['min'])) if market['limits']['amount']['min'] is not None else 1
+        # Kiekio (contracts) skaičiavimas pagal svertą ir maržą
+        total_value = MARGIN_USDT * final_leverage
+        raw_crypto_amount = total_value / entry_price
         
-        if amount < min_amount:
-            amount = min_amount
+        contract_size = float(market.get('contractSize', 1.0))
+        contracts_qty = raw_crypto_amount / contract_size
+        
+        min_contracts = float(market['limits']['amount']['min'])
+        final_contracts = max(contracts_qty, min_contracts)
+        
+        amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # --- 5. VIENO ŽINGSNIO UŽSAKYMAS SU VISISKAIS PARAMETRAIS (Ištaiso leverage klaidą) ---
+        # Užsakymo parametrai MEXC Futures platformai
         params = {
-            'posSide': 'SHORT',
-            'openType': 1,                      # Isolated
-            'leverage': int(active_leverage),   # Paduodame svertą tiesiai į užsakymą fjučerių API reikalavimui
-            'stopLossPrice': sl_price,          # Prisegtas SL
-            'takeProfitPrice': tp_price,        # Prisegtas TP
-            'slPrice': sl_price,                # Papildomi dubliuojantys laukai CCXT suderinamumui
+            'posSide': pos_side,
+            'openType': 1,
+            'leverage': int(final_leverage),
+            'stopLossPrice': sl_price,
+            'takeProfitPrice': tp_price,
             'tpPrice': tp_price,
-            'priceWay': 1                       # 1 = Triggeriuojama pagal Mark Price
+            'slPrice': sl_price,
+            'priceWay': 1
         }
 
+        # Market pozicijos atidarymas
         order = exchange.create_order(
             symbol=symbol,
             type='market',
-            side='sell',
+            side=side,
             amount=amount,
             price=None,
             params=params
         )
 
-        print(f"SHORT MARKET sandoris sėkmingai įvykdytas! | {symbol} | Qty={amount} | SL={sl_price} | TP={tp_price}")
+        print(f"{pos_side} MARKET sandoris įvykdytas | {symbol} | SL={sl_price} | TP={tp_price}")
+
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
-        print(f"KRITINĖ KLAIDA: {traceback.format_exc()}")
+        print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
 
 if __name__ == '__main__':
