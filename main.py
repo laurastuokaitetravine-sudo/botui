@@ -141,7 +141,9 @@ def webhook():
         open_params = {
             'posSide': 'SHORT',
             'openType': 1,
+            'leverage': int(active_leverage)  # Ši eilutė ištaiso jūsų gautą klaidą
         }
+
 
         order = exchange.create_order(
             symbol=symbol,
