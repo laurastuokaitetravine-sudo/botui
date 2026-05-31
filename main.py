@@ -18,70 +18,62 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 10
-MARGIN_USDT = 1.0
-
+DEFAULT_LEVERAGE = 25  
+MARGIN_USDT = 5.0     
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE", 200
-
+    return "BOTAS ONLINE (TIK SHORT - DUOMENYS IŠ PLOTS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            data = json.loads(request.data.decode('utf-8').strip())
+            try:
+                raw_data = request.data.decode('utf-8').strip()
+                data = json.loads(raw_data)
+            except Exception as json_err:
+                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
+                return {"error": "Invalid JSON format"}, 400
 
-        if data.get('passphrase') != MY_PASSWORD:
+        if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
 
         action = str(data.get('action', '')).lower()
-        if action not in ['long', 'short']:
-            return f"Ignored (Invalid action: {action})", 200
+        if action != 'short':
+            return "Ignored (Only SHORT allowed)", 200
 
         tv_ticker = data.get('ticker')
         if not tv_ticker:
             return {"error": "Missing ticker"}, 400
 
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        if clean_ticker == "PEPE":
+            clean_ticker = "10000PEPE"
+            
         symbol = f"{clean_ticker}/USDT:USDT"
 
         markets = exchange.load_markets()
         if symbol not in markets:
-            return {"error": f"Symbol {symbol} not found"}, 400
+            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
 
-        # --- TICKER ---
-        ticker = None
-        for _ in range(3):
-            try:
-                ticker = exchange.fetch_ticker(symbol)
-                break
-            except ccxt.NetworkError:
-                exchange.sleep(1000)
+        # --- DUOMENŲ PAĖMIMAS TIESIAI IŠ TRADINGVIEW PLOTS ---
+        try:
+            entry_price = float(data.get('entry_price'))
+            sl_price = float(data.get('sl_price'))
+            tp_price = float(data.get('tp_price'))
+        except (TypeError, ValueError):
+            return {"error": "Klaida: Žinutėje trūksta entry_price, sl_price arba tp_price reikšmių arba jos netinkamo formato"}, 400
 
-        if not ticker:
-            return {"error": "MEXC network error"}, 502
+        pos_side = 'SHORT'
+        pos_mode = 2 
 
-        if action == 'long':
-            entry_price = float(ticker['ask'])
-            side = 'buy'
-            close_side = 'sell'
-            pos_side = 'LONG'
-            pos_mode = 1
-        else:
-            entry_price = float(ticker['bid'])
-            side = 'sell'
-            close_side = 'buy'
-            pos_side = 'SHORT'
-            pos_mode = 2
-
-        # --- LEVERAGE ---
+        # --- SVERTO NUSTATYMAS ---
         max_lev = DEFAULT_LEVERAGE
-        if market['limits']['leverage']['max']:
+        if market.get('limits', {}).get('leverage', {}).get('max'):
             max_lev = min(DEFAULT_LEVERAGE, int(market['limits']['leverage']['max']))
 
         try:
@@ -92,93 +84,57 @@ def webhook():
         except Exception:
             pass
 
-        # --- SL iš TV ---
-        raw_sl = data.get('sl_price')
-        sl_price = None
-        if raw_sl and str(raw_sl).lower() not in ['nan', 'null', 'na', '']:
-            try:
-                sl_price = float(raw_sl)
-            except:
-                sl_price = None
-
-        # --- TP/SL LOGIKA ---
-        if action == 'long':
-            tp_price = entry_price * 1.008
-            if sl_price is None or sl_price >= entry_price:
-                sl_price = entry_price * 0.99
-            sl_price = entry_price - ((entry_price - sl_price) / 2)
-        else:
-            tp_price = entry_price * 0.992
-            if sl_price is None or sl_price <= entry_price:
-                sl_price = entry_price * 1.01
-            sl_price = entry_price + ((sl_price - entry_price) / 2)
-
+        # Kainų suapvalinimas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- AMOUNT ---
+        # --- KIEKIO (AMOUNT) SKAIČIAVIMAS ---
         total_value = MARGIN_USDT * max_lev
         raw_crypto = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
         contracts = raw_crypto / contract_size
+        
         min_contracts = float(market['limits']['amount']['min'])
         final_contracts = max(contracts, min_contracts)
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # --- 1) MARKET ENTRY ---
-        entry_order = exchange.create_order(
+        # --- INTEGRUOTI PARAMETRAI (PostOnly + Įrašyti TP/SL iš Plotų) ---
+        params = {
+            'posSide': pos_side,
+            'openType': 1,  
+            'leverage': max_lev,
+            'stopLossPrice': sl_price,
+            'takeProfitPrice': tp_price,
+            'timeInForce': 'PostOnly'  # 0% Maker mokesčiai fjučeriuose
+        }
+
+        print(f"Siunčiamas SHORT LIMIT (Post-Only) | Įėjimas: {entry_price} | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
+
+        # Vykdomas orderis su tiksliomis indikatoriaus kainomis
+        order = exchange.create_order(
             symbol=symbol,
-            type='market',
-            side=side,
+            type='limit',
+            side='sell',
             amount=amount,
-            params={
-                'posSide': pos_side,
-                'openType': 1,
-                'leverage': max_lev
-            }
+            price=entry_price,
+            params=params
         )
 
-        # --- 2) STOP LOSS TRIGGER ---
-        sl_order = exchange.create_order(
-            symbol=symbol,
-            type='trigger',
-            side=close_side,
-            amount=amount,
-            params={
-                'triggerPrice': sl_price,
-                'orderType': 1,
-                'posSide': pos_side
-            }
-        )
-
-        # --- 3) TAKE PROFIT TRIGGER ---
-        tp_order = exchange.create_order(
-            symbol=symbol,
-            type='trigger',
-            side=close_side,
-            amount=amount,
-            params={
-                'triggerPrice': tp_price,
-                'orderType': 1,
-                'posSide': pos_side
-            }
-        )
-
-        print(f"{pos_side} OPENED | {symbol} | ENTRY={entry_price} | SL={sl_price} | TP={tp_price}")
+        print(f"SHORT PATEIKTAS SĖKMINGAI | {symbol} | ID: {order['id']}")
 
         return {
             "status": "success",
             "symbol": symbol,
-            "entry_order": entry_order['id'],
-            "sl_order": sl_order['id'],
-            "tp_order": tp_order['id']
+            "order_id": order['id'],
+            "entry_price": entry_price,
+            "sl": sl_price,
+            "tp": tp_price
         }, 200
 
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}, 400
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
