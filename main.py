@@ -23,23 +23,29 @@ MARGIN_USDT = 5.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (TIK SHORT - LIMIT POST-ONLY)", 200
+    return "BOTAS ONLINE (TIK SHORT - LIMIT POST-ONLY SU APSAUGA)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(force=True, silent=True)
-        if not data:
-            try:
-                raw_data = request.data.decode('utf-8').strip()
-                data = json.loads(raw_data)
-            except Exception as json_err:
-                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
-                return {"error": "Invalid JSON format"}, 400
+        # Priverstinai nuskaitome žinutę kaip tekstą, kad išvengtume 400 klaidų dėl TV antraščių
+        raw_data = request.data.decode('utf-8').strip()
+        print(f"Gauti raw duomenys iš TradingView: {raw_data}")
+        
+        if not raw_data:
+            return {"error": "Tuščia užklausa"}, 400
 
-        if not data or data.get('passphrase') != MY_PASSWORD:
+        try:
+            data = json.loads(raw_data)
+        except Exception as json_err:
+            print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
+            return {"error": f"Invalid JSON format: {str(json_err)}"}, 400
+
+        # Slaptažodžio patikrinimas
+        if data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
 
+        # Tikriname ar užsakymas yra SHORT
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
@@ -48,6 +54,7 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker"}, 400
 
+        # Tikerio formatavimas biržai
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
@@ -60,7 +67,7 @@ def webhook():
 
         market = markets[symbol]
 
-        # --- DUOMENŲ PAĖMIMAS IŠ TRADINGVIEW ---
+        # --- DUOMENŲ PAĖMIMAS ---
         try:
             entry_price = float(data.get('entry_price'))
             sl_price = float(data.get('sl_price'))
@@ -85,8 +92,7 @@ def webhook():
             pass
 
         # --- APSAUGA NUO POST-ONLY ATMETIMO ---
-        # Kadangi kaina jau liečia lygį, padidiname Short limit kainą 0.05%, 
-        # kad orderis garantuotai atsidurtų knygoje virš esamos kainos ir nebūtų atmestas.
+        # Padidiname Limit kainą 0.05%, kad orderis garantuotai atsidurtų knygoje (Asks)
         limit_entry_price = entry_price * 1.0005 
 
         # Kainų suapvalinimas pagal tikslias biržos taisykles
@@ -111,7 +117,7 @@ def webhook():
             'leverage': max_lev,
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # Užtikrina 0% Maker mokesčius (jei neįmanoma pastatyti – orderis atšaukiamas, o ne vykdomas kaip brangus Taker)
+            'timeInForce': 'PostOnly'  # Garantuoja 0% Maker mokesčius futures rinkoje
         }
 
         print(f"Siunčiamas SHORT LIMIT (Post-Only) | Įėjimas: {limit_entry_price} | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
