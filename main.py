@@ -23,7 +23,7 @@ MARGIN_USDT = 5.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (TIK SHORT - DUOMENYS IŠ PLOTS)", 200
+    return "BOTAS ONLINE (TIK SHORT IR MARKET ORDER)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -60,13 +60,13 @@ def webhook():
 
         market = markets[symbol]
 
-        # --- DUOMENŲ PAĖMIMAS TIESIAI IŠ TRADINGVIEW PLOTS ---
+        # --- DUOMENŲ PAĖMIMAS IŠ TRADINGVIEW ---
         try:
             entry_price = float(data.get('entry_price'))
             sl_price = float(data.get('sl_price'))
             tp_price = float(data.get('tp_price'))
         except (TypeError, ValueError):
-            return {"error": "Klaida: Žinutėje trūksta entry_price, sl_price arba tp_price reikšmių arba jos netinkamo formato"}, 400
+            return {"error": "Klaida: Žinutėje trūksta entry_price, sl_price arba tp_price reikšmių"}, 400
 
         pos_side = 'SHORT'
         pos_mode = 2 
@@ -85,7 +85,6 @@ def webhook():
             pass
 
         # Kainų suapvalinimas pagal tikslias biržos taisykles
-        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
@@ -99,35 +98,32 @@ def webhook():
         final_contracts = max(contracts, min_contracts)
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # --- INTEGRUOTI PARAMETRAI (PostOnly + Įrašyti TP/SL iš Plotų) ---
+        # --- INTEGRUOTI PARAMETRAI RINKOS KAINAI ---
         params = {
             'posSide': pos_side,
             'openType': 1,  
             'leverage': max_lev,
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # 0% Maker mokesčiai fjučeriuose
+            'takeProfitPrice': tp_price
         }
 
-        print(f"Siunčiamas SHORT LIMIT (Post-Only) | Įėjimas: {entry_price} | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
+        print(f"Siunčiamas SHORT MARKET orderis | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
 
-        # Vykdomas orderis su tiksliomis indikatoriaus kainomis
+        # Vykdomas orderis RINKOS kaina
         order = exchange.create_order(
             symbol=symbol,
-            type='limit',
+            type='market', # Pakeista į market greitam vykdymui
             side='sell',
             amount=amount,
-            price=entry_price,
             params=params
         )
 
-        print(f"SHORT PATEIKTAS SĖKMINGAI | {symbol} | ID: {order['id']}")
+        print(f"SHORT VYKDOMAS RINKOS KAINA | {symbol} | ID: {order['id']}")
 
         return {
             "status": "success",
             "symbol": symbol,
             "order_id": order['id'],
-            "entry_price": entry_price,
             "sl": sl_price,
             "tp": tp_price
         }, 200
