@@ -6,11 +6,10 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- MEXC KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
@@ -18,43 +17,39 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 5  
-MARGIN_USDT = 5.0     
+DEFAULT_LEVERAGE = 25  
+MARGIN_USDT = 1.0 
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (TIK SHORT - LIMIT POST-ONLY SU APSAUGA)", 200
+    return "BOTAS ONLINE", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Priverstinai nuskaitome žinutę kaip tekstą, kad išvengtume 400 klaidų dėl TV antraščių
-        raw_data = request.data.decode('utf-8').strip()
-        print(f"Gauti raw duomenys iš TradingView: {raw_data}")
+        data = request.get_json(force=True, silent=True)
         
-        if not raw_data:
-            return {"error": "Tuščia užklausa"}, 400
+        if not data:
+            try:
+                raw_data = request.data.decode('utf-8').strip()
+                data = json.loads(raw_data)
+            except Exception as json_err:
+                print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
+                return {"error": "Invalid JSON format"}, 400
 
-        try:
-            data = json.loads(raw_data)
-        except Exception as json_err:
-            print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
-            return {"error": f"Invalid JSON format: {str(json_err)}"}, 400
-
-        # Slaptažodžio patikrinimas
-        if data.get('passphrase') != MY_PASSWORD:
+        if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-
-        # Tikriname ar užsakymas yra SHORT
+        
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
 
         tv_ticker = data.get('ticker')
         if not tv_ticker:
-            return {"error": "Missing ticker"}, 400
+            print("Klaida: Žinutėje negautas 'ticker' kintamasis")
+            return {"error": "Missing ticker in request"}, 400
 
-        # Tikerio formatavimas biržai
+        # Universali monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
@@ -63,88 +58,95 @@ def webhook():
 
         markets = exchange.load_markets()
         if symbol not in markets:
+            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
+        ticker = exchange.fetch_ticker(symbol)
+        
+        # Paimame ASK (pardavimo) kainą vietoje LAST, kad Post-Only geriau suveiktų
+        entry_price = float(ticker['ask']) 
+        
+        # Sverto tikrinimas
+        max_leverage = DEFAULT_LEVERAGE
+        if 'limits' in market and 'leverage' in market['limits']:
+            if market['limits']['leverage']['max'] is not None:
+                max_leverage = int(market['limits']['leverage']['max'])
 
-        # --- DUOMENŲ PAĖMIMAS ---
-        try:
-            entry_price = float(data.get('entry_price'))
-            sl_price = float(data.get('sl_price'))
-            tp_price = float(data.get('tp_price'))
-        except (TypeError, ValueError):
-            return {"error": "Klaida: Žinutėje trūksta entry_price, sl_price arba tp_price reikšmių"}, 400
+        final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x (Maksimalus biržos limitas: {max_leverage}x)")
 
-        pos_side = 'SHORT'
-        pos_mode = 2 
+        # Saugus dinaminio SL nurašymas
+        raw_sl = data.get('sl_price')
+        sl_price = None
+        
+        if raw_sl and str(raw_sl).strip().lower() not in ['nan', 'na', 'null', '']:
+            try:
+                sl_price = float(raw_sl)
+            except ValueError:
+                sl_price = None
 
-        # --- SVERTO NUSTATYMAS ---
-        max_lev = DEFAULT_LEVERAGE
-        if market.get('limits', {}).get('leverage', {}).get('max'):
-            max_lev = min(DEFAULT_LEVERAGE, int(market['limits']['leverage']['max']))
+        # --- MATEMATIKA: 20% PELNAS IR PERPUS SUMAŽINTAS SL ---
+        tp_price = entry_price * 0.992
 
-        try:
-            exchange.set_leverage(max_lev, symbol, {
-                'openType': 1,
-                'positionType': pos_mode
-            })
-        except Exception:
-            pass
+        if sl_price is None or sl_price <= entry_price:
+            sl_price = entry_price * 1.01  
 
-        # --- APSAUGA NUO POST-ONLY ATMETIMO ---
-        # Padidiname Limit kainą 0.05%, kad orderis garantuotai atsidurtų knygoje (Asks)
-        limit_entry_price = entry_price * 1.0005 
+        # Sumažiname SL atstumą perpus
+        sl_price = entry_price + ((sl_price - entry_price) / 2)
 
-        # Kainų suapvalinimas pagal tikslias biržos taisykles
-        limit_entry_price = float(exchange.price_to_precision(symbol, limit_entry_price))
+        # Suapvaliname kainas pagal biržos taisykles
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- KIEKIO (AMOUNT) SKAIČIAVIMAS ---
-        total_value = MARGIN_USDT * max_lev
-        raw_crypto = total_value / limit_entry_price
+        # Kiekio skaičiavimas fjučerių kontraktams
+        total_value = MARGIN_USDT * final_leverage
+        raw_crypto_amount = total_value / entry_price
+        
         contract_size = float(market.get('contractSize', 1.0))
-        contracts = raw_crypto / contract_size
+        contracts_qty = raw_crypto_amount / contract_size
         
         min_contracts = float(market['limits']['amount']['min'])
-        final_contracts = max(contracts, min_contracts)
+        final_contracts = max(contracts_qty, min_contracts)
+        
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # --- PARAMETRAI SU POSTONLY IR TP/SL ---
+        pos_mode = 2  # SHORT fiksuotas
+
+        try:
+            exchange.set_leverage(int(final_leverage), symbol, {
+                'openType': 1,      
+                'positionType': pos_mode
+            })
+        except:
+            pass
+
+        # Užsakymo parametrų paruošimas
         params = {
-            'posSide': pos_side,
-            'openType': 1,  
-            'leverage': max_lev,
+            'posSide': 'SHORT',
+            'openType': 1,
+            'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'  # Garantuoja 0% Maker mokesčius futures rinkoje
+            'timeInForce': 'PostOnly'  
         }
 
-        print(f"Siunčiamas SHORT LIMIT (Post-Only) | Įėjimas: {limit_entry_price} | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
-
-        # Vykdomas LIMIT užsakymas
+        # Vykdoma kaip LIMIT užsakymas
         order = exchange.create_order(
             symbol=symbol,
-            type='limit', 
+            type='limit',       
             side='sell',
             amount=amount,
-            price=limit_entry_price,
+            price=entry_price,  
             params=params
         )
 
-        print(f"SHORT LIMIT PATEIKTAS SĖKMINGAI | {symbol} | ID: {order['id']}")
-
-        return {
-            "status": "success",
-            "symbol": symbol,
-            "order_id": order['id'],
-            "entry_price": limit_entry_price,
-            "sl": sl_price,
-            "tp": tp_price
-        }, 200
+        print(f"SHORT LIMIT (Post-Only) pastatytas! Moneta: {symbol} | Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
+        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
-        print(traceback.format_exc())
+        print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
 
 if __name__ == '__main__':
