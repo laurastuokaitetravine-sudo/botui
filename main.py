@@ -21,7 +21,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 30.0 
+MARGIN_USDT = 35.0 
 
 # --- FONINĖ LIKUSIOS POZICIJOS BE SEKIMO FUNKCIJA ---
 def monitor_tp1_and_set_breakeven(symbol, tp1_order_id, entry_price, current_sl, final_leverage):
