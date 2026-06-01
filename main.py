@@ -22,7 +22,7 @@ MARGIN_USDT = 30.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (3x TP IŠ INDIKATORIAUS)", 200
+    return "BOTAS ONLINE (3x TP IŠ INDIKATORIAUS - 100% UNIVERSALUS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -49,17 +49,38 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
-        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
-        if clean_ticker == "PEPE":
-            clean_ticker = "10000PEPE"
-            
-        symbol = f"{clean_ticker}/USDT:USDT"
-
+        # --- IŠMANUS FJUČERIŲ TICKERIO VALDYMAS ---
+        # Išsivalome tekstą iš TradingView (pvz., "POLUSDT.P" -> "POL")
+        clean_base = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").upper()
+        
+        # Užkrauname visus MEXC rinkos duomenis
         markets = exchange.load_markets()
-        if symbol not in markets:
-            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
-            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
+        symbol = None
+
+        # 1. Tikriname standartinius fjučerių pavadinimų šablonus
+        possible_symbols = [
+            f"{clean_base}/USDT:USDT",
+            f"10000{clean_base}/USDT:USDT",
+            f"1000{clean_base}/USDT:USDT",
+            f"100{clean_base}/USDT:USDT"
+        ]
+
+        for pos_sym in possible_symbols:
+            if pos_sym in markets:
+                symbol = pos_sym
+                break
+
+        # 2. Saugiklis: Jei nerado pagal šabloną (kaip POL atveju), ieškome tiesioginio fjučerio (linear) biržos sąraše
+        if not symbol:
+            for m_sym, m_info in markets.items():
+                if 'linear' in m_info and m_info['linear'] and clean_base in m_sym:
+                    symbol = m_sym
+                    break
+
+        # Jei moneta apskritai neegzistuoja fjučerių rinkoje
+        if not symbol or symbol not in markets:
+            print(f"Klaida: Moneta {clean_base} fjučerių rinkoje nerasta")
+            return {"error": f"Symbol for {clean_base} not found on MEXC futures"}, 400
 
         market = markets[symbol]
         ticker = exchange.fetch_ticker(symbol)
@@ -74,7 +95,7 @@ def webhook():
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
+        print(f"Monetai {symbol} surastas fjučerių svertas: {final_leverage}x")
 
         # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
         try:
@@ -159,7 +180,7 @@ def webhook():
                 params=params
             )
             order_ids.append(order['id'])
-            print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
+            print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Moneta: {symbol} | Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
 
         return {"status": "success", "symbol": symbol, "order_ids": order_ids}, 200
 
