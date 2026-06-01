@@ -18,12 +18,12 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 1.0     
+DEFAULT_LEVERAGE = 5  
+MARGIN_USDT = 5.0     
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (TIK SHORT IR MARKET ORDER)", 200
+    return "BOTAS ONLINE (TIK SHORT - LIMIT POST-ONLY)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -84,13 +84,19 @@ def webhook():
         except Exception:
             pass
 
+        # --- APSAUGA NUO POST-ONLY ATMETIMO ---
+        # Kadangi kaina jau liečia lygį, padidiname Short limit kainą 0.05%, 
+        # kad orderis garantuotai atsidurtų knygoje virš esamos kainos ir nebūtų atmestas.
+        limit_entry_price = entry_price * 1.0005 
+
         # Kainų suapvalinimas pagal tikslias biržos taisykles
+        limit_entry_price = float(exchange.price_to_precision(symbol, limit_entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
         # --- KIEKIO (AMOUNT) SKAIČIAVIMAS ---
         total_value = MARGIN_USDT * max_lev
-        raw_crypto = total_value / entry_price
+        raw_crypto = total_value / limit_entry_price
         contract_size = float(market.get('contractSize', 1.0))
         contracts = raw_crypto / contract_size
         
@@ -98,32 +104,35 @@ def webhook():
         final_contracts = max(contracts, min_contracts)
         amount = float(exchange.amount_to_precision(symbol, final_contracts))
 
-        # --- INTEGRUOTI PARAMETRAI RINKOS KAINAI ---
+        # --- PARAMETRAI SU POSTONLY IR TP/SL ---
         params = {
             'posSide': pos_side,
             'openType': 1,  
             'leverage': max_lev,
             'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price
+            'takeProfitPrice': tp_price,
+            'timeInForce': 'PostOnly'  # Užtikrina 0% Maker mokesčius (jei neįmanoma pastatyti – orderis atšaukiamas, o ne vykdomas kaip brangus Taker)
         }
 
-        print(f"Siunčiamas SHORT MARKET orderis | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
+        print(f"Siunčiamas SHORT LIMIT (Post-Only) | Įėjimas: {limit_entry_price} | Kiekis: {amount} | SL: {sl_price} | TP: {tp_price}")
 
-        # Vykdomas orderis RINKOS kaina
+        # Vykdomas LIMIT užsakymas
         order = exchange.create_order(
             symbol=symbol,
-            type='market', # Pakeista į market greitam vykdymui
+            type='limit', 
             side='sell',
             amount=amount,
+            price=limit_entry_price,
             params=params
         )
 
-        print(f"SHORT VYKDOMAS RINKOS KAINA | {symbol} | ID: {order['id']}")
+        print(f"SHORT LIMIT PATEIKTAS SĖKMINGAI | {symbol} | ID: {order['id']}")
 
         return {
             "status": "success",
             "symbol": symbol,
             "order_id": order['id'],
+            "entry_price": limit_entry_price,
             "sl": sl_price,
             "tp": tp_price
         }, 200
