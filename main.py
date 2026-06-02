@@ -1,8 +1,6 @@
 import os
 import json
 import traceback
-import time
-import threading
 from flask import Flask, request
 import ccxt
 
@@ -12,7 +10,6 @@ app = Flask(__name__)
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
-    'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
@@ -21,57 +18,11 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 50.0 
-
-# --- FONINĖ LIKUSIOS POZICIJOS BE SEKIMO FUNKCIJA ---
-def monitor_tp1_and_set_breakeven(symbol, tp1_order_id, entry_price, current_sl, final_leverage):
-    print(f"[BE SEKIKLIS] Pradedama fone stebėti TP1 užsakymą: {tp1_order_id} monetai {symbol}")
-    tp1_filled = False
-    
-    for _ in range(14400):
-        try:
-            time.sleep(3)
-            order_info = exchange.fetch_order(tp1_order_id, symbol)
-            
-            if order_info['status'] == 'closed':
-                print(f"[BE SEKIKLIS] 🔥 TP1 pasiektas! Užsakymas {tp1_order_id} užpildytas. Perkeliamas SL į Breakeven...")
-                tp1_filled = True
-                break
-                
-            if order_info['status'] == 'canceled':
-                print(f"[BE SEKIKLIS] TP1 užsakymas buvo atšauktas rankiniu būdu. Sekimas stabdomas.")
-                break
-                
-        except Exception as err:
-            if "Order does not exist" in str(err) or "not found" in str(err).lower():
-                print(f"[BE SEKIKLIS] TP1 užsakymas užpildytas (nerastas aktyviuose). Perkeliamas SL į Breakeven...")
-                tp1_filled = True
-                break
-            print(f"[BE SEKIKLIS] Klaida tikrinant užsakymą: {err}")
-            
-    if tp1_filled:
-        try:
-            exchange.create_order(
-                symbol=symbol,
-                type='limit',
-                side='buy',
-                amount=0,
-                price=entry_price,
-                params={
-                    'posSide': 'SHORT',
-                    'openType': 1,
-                    'leverage': int(final_leverage),
-                    'stopLossPrice': entry_price,
-                    'type': 'EXECUTE_ORDER'
-                }
-            )
-            print(f"[BE SEKIKLIS] ✅ SĖKMINGAI likusios dalys perkeltos į Breakeven ties kaina: {entry_price}")
-        except Exception as e:
-            print(f"[BE SEKIKLIS] ❌ Nepavyko perstatyti SL į Breakeven: {e}")
+MARGIN_USDT = 30.0 
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (3x TP + AUTOMATINIS BREAKEVEN - 100% UNIVERSALUS)", 200
+    return "BOTAS ONLINE (3x TP IŠ INDIKATORIAUS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -98,80 +49,44 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # --- IŠMANUS IR UNIVERSALUS TICKERIO VALDYMAS (VISOMS MONETOMS) ---
-        clean_base = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").upper()
-        
+        # Universali monetų tvarkymo logika
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        if clean_ticker == "PEPE":
+            clean_ticker = "10000PEPE"
+            
+        symbol = f"{clean_ticker}/USDT:USDT"
+
         markets = exchange.load_markets()
-        symbol = None
+        if symbol not in markets:
+            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
+            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
-        possible_symbols = [
-            f"{clean_base}/USDT:USDT",
-            f"10000{clean_base}/USDT:USDT",
-            f"1000{clean_base}/USDT:USDT",
-            f"100{clean_base}/USDT:USDT"
-        ]
-
-        for pos_sym in possible_symbols:
-            if pos_sym in markets:
-                symbol = pos_sym
-                break
-
-        if not symbol:
-            for m_sym, m_info in markets.items():
-                if 'linear' in m_info and m_info['linear'] and clean_base in m_sym:
-                    symbol = m_sym
-                    break
-
-        if not symbol or symbol not in markets:
-            print(f"Klaida: Moneta {clean_base} fjučerių rinkoje nerasta")
-            return {"error": f"Symbol for {clean_base} not found on MEXC futures"}, 400
-
-               market = markets[symbol]
+        market = markets[symbol]
         
-        # --- KLAIDOS IŠTAISYMAS VISIEMS LAIKAMS (SAUGUS KAINOS GAVIMAS) ---
-        entry_price = None
+        # --- IŠTAISYTA: Užklausą darome per stabilesnį orderbook API ---
+        orderbook = exchange.fetch_order_book(symbol, 1)
+        entry_price = float(orderbook['asks'][0][0])
         
-        # 1. BŪDAS: Bandome standartinį CCXT metodą
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            entry_price = float(ticker['ask'] if ticker.get('ask') else ticker['last'])
-        except Exception as e:
-            print(f"[⚠️ ĮSPĖJIMAS] Standartinis fetch_ticker nepavyko, jungiamas tiesioginis API: {e}")
-
-        # 2. BŪDAS: Jei CCXT metodas stringa, patys suformatuojame MEXC formatą (pvz., BLUR_USDT) ir kreipiamės tiesiogiai
-        if not entry_price:
-            try:
-                # Išvalome simbolį iki gryno MEXC fjučerių formato (iš BLUR/USDT:USDT gausime BLUR_USDT)
-                mexc_style_symbol = symbol.split(':')[0].replace('/', '_')
-                
-                # Kreipiamės tiesiai į žemo lygio MEXC v1/v2/v3 kontraktų API endpointą
-                raw_ticker = exchange.contractPublicGetTicker({'symbol': mexc_style_symbol})
-                
-                if raw_ticker and 'data' in raw_ticker:
-                    ticker_data = raw_ticker['data']
-                    # Pasiimame geriausią pardavimo kainą (ask1) arba paskutinę kainą (lastPrice)
-                    entry_price = float(ticker_data.get('ask1') if ticker_data.get('ask1') else ticker_data.get('lastPrice'))
-                    print(f"[🚀 SĖKMĖ] Kaina gauta per tiesioginį MEXC API: {entry_price}")
-            except Exception as direct_err:
-                print(f"[❌ KRITINĖ KLAIDA] Tiesioginis MEXC API metodas taip pat sugriuvo: {direct_err}")
-
-        # 3. SAUGIKLIS: Jei abu būdai pavedė, neleidžiame botui nulūžti ir grąžiname klaidą TradingView
-        if not entry_price or entry_price <= 0:
-            print(f"[🛑 STOP] Nepavyko gauti kainos monetai {symbol} nei vienu būdu.")
-            return {"error": f"Nepavyko gauti kainos monetai {symbol} iš MEXC serverių."}, 500
-        # ------------------------------------------------------------------
-
+        # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} surastas fjučerių svertas: {final_leverage}x")
+        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS ---
+        # --- IŠTAISYTA: Svertą nustatome prieš pradedant skaičiuoti kiekius ---
+        pos_mode = 2  # SHORT fiksuotas
+        try:
+            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
+        except:
+            pass
+
+        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
         try:
             sl_price = float(data.get('sl_price'))
+            
             tp1_raw = data.get('tp_price_1')
             tp2_raw = data.get('tp_price_2')
             tp3_raw = data.get('tp_price_3')
@@ -183,13 +98,14 @@ def webhook():
         except (TypeError, ValueError):
             return {"error": "Klaida: Žinutėje gauti blogi kainų formatai"}, 400
 
+        # Suapvaliname kainas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp1_price = float(exchange.price_to_precision(symbol, tp1_price))
         tp2_price = float(exchange.price_to_precision(symbol, tp2_price))
         tp3_price = float(exchange.price_to_precision(symbol, tp3_price))
 
-        # Kiekio skaičiavimas (70% / 20% / 10%)
+        # --- KIEKIO IR PROPORCIJŲ SKAIČIAVIMAS (70% / 20% / 10%) ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
@@ -197,19 +113,17 @@ def webhook():
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
 
-        qty_tp1 = max(total_contracts * 0.70, min_contracts)
-        qty_tp2 = max(total_contracts * 0.20, min_contracts)
-        qty_tp3 = max(total_contracts * 0.10, min_contracts)
+        qty_tp1 = total_contracts * 0.70
+        qty_tp2 = total_contracts * 0.20
+        qty_tp3 = total_contracts * 0.10
+
+        qty_tp1 = max(qty_tp1, min_contracts)
+        qty_tp2 = max(qty_tp2, min_contracts)
+        qty_tp3 = max(qty_tp3, min_contracts)
 
         amt_tp1 = float(exchange.amount_to_precision(symbol, qty_tp1))
         amt_tp2 = float(exchange.amount_to_precision(symbol, qty_tp2))
         amt_tp3 = float(exchange.amount_to_precision(symbol, qty_tp3))
-
-        pos_mode = 2
-        try:
-            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
-        except:
-            pass
 
         tp_configs = [
             {"num": 1, "amt": amt_tp1, "tp": tp1_price, "pct": "70%"},
@@ -218,8 +132,8 @@ def webhook():
         ]
 
         order_ids = []
-        tp1_generated_id = None
 
+        # --- 3 ATSKIRŲ LIMIT ORDERIŲ PATEIKIMAS ---
         for config in tp_configs:
             params = {
                 'posSide': 'SHORT',
@@ -239,18 +153,7 @@ def webhook():
                 params=params
             )
             order_ids.append(order['id'])
-            if config["num"] == 1:
-                tp1_generated_id = order['id']
-                
-            print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Moneta: {symbol} | Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
-
-        if tp1_generated_id:
-            t = threading.Thread(
-                target=monitor_tp1_and_set_breakeven, 
-                args=(symbol, tp1_generated_id, entry_price, sl_price, final_leverage)
-            )
-            t.daemon = True
-            t.start()
+            print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
 
         return {"status": "success", "symbol": symbol, "order_ids": order_ids}, 200
 
