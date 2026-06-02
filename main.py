@@ -126,10 +126,41 @@ def webhook():
             print(f"Klaida: Moneta {clean_base} fjučerių rinkoje nerasta")
             return {"error": f"Symbol for {clean_base} not found on MEXC futures"}, 400
 
-        market = markets[symbol]
-        ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['ask']) 
+               market = markets[symbol]
         
+        # --- KLAIDOS IŠTAISYMAS VISIEMS LAIKAMS (SAUGUS KAINOS GAVIMAS) ---
+        entry_price = None
+        
+        # 1. BŪDAS: Bandome standartinį CCXT metodą
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            entry_price = float(ticker['ask'] if ticker.get('ask') else ticker['last'])
+        except Exception as e:
+            print(f"[⚠️ ĮSPĖJIMAS] Standartinis fetch_ticker nepavyko, jungiamas tiesioginis API: {e}")
+
+        # 2. BŪDAS: Jei CCXT metodas stringa, patys suformatuojame MEXC formatą (pvz., BLUR_USDT) ir kreipiamės tiesiogiai
+        if not entry_price:
+            try:
+                # Išvalome simbolį iki gryno MEXC fjučerių formato (iš BLUR/USDT:USDT gausime BLUR_USDT)
+                mexc_style_symbol = symbol.split(':')[0].replace('/', '_')
+                
+                # Kreipiamės tiesiai į žemo lygio MEXC v1/v2/v3 kontraktų API endpointą
+                raw_ticker = exchange.contractPublicGetTicker({'symbol': mexc_style_symbol})
+                
+                if raw_ticker and 'data' in raw_ticker:
+                    ticker_data = raw_ticker['data']
+                    # Pasiimame geriausią pardavimo kainą (ask1) arba paskutinę kainą (lastPrice)
+                    entry_price = float(ticker_data.get('ask1') if ticker_data.get('ask1') else ticker_data.get('lastPrice'))
+                    print(f"[🚀 SĖKMĖ] Kaina gauta per tiesioginį MEXC API: {entry_price}")
+            except Exception as direct_err:
+                print(f"[❌ KRITINĖ KLAIDA] Tiesioginis MEXC API metodas taip pat sugriuvo: {direct_err}")
+
+        # 3. SAUGIKLIS: Jei abu būdai pavedė, neleidžiame botui nulūžti ir grąžiname klaidą TradingView
+        if not entry_price or entry_price <= 0:
+            print(f"[🛑 STOP] Nepavyko gauti kainos monetai {symbol} nei vienu būdu.")
+            return {"error": f"Nepavyko gauti kainos monetai {symbol} iš MEXC serverių."}, 500
+        # ------------------------------------------------------------------
+
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
             if market['limits']['leverage']['max'] is not None:
