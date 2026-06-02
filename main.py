@@ -8,7 +8,7 @@ import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA ---
+# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -21,36 +21,28 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 35.0 
+MARGIN_USDT = 30.0 
 
 # --- FONINĖ LIKUSIOS POZICIJOS BE SEKIMO FUNKCIJA ---
 def monitor_tp1_and_set_breakeven(symbol, tp1_order_id, entry_price, current_sl, final_leverage):
-    """
-    Ši funkcija fone stebi TP1 užsakymą. Kai jis užsipildo, 
-    botas automatiškai perkelia likusių dalių SL į Breakeven (įėjimo kainą).
-    """
-    print(f"[BE SEKKIKLIS] Pradedama fone stebėti TP1 užsakymą: {tp1_order_id} monetai {symbol}")
+    print(f"[BE SEKIKLIS] Pradedama fone stebėti TP1 užsakymą: {tp1_order_id} monetai {symbol}")
     tp1_filled = False
     
-    # Tikriname kas 3 sekundes, maksimaliai iki 12 valandų (14400 ciklų)
     for _ in range(14400):
         try:
             time.sleep(3)
             order_info = exchange.fetch_order(tp1_order_id, symbol)
             
-            # Jei užsakymas sėkmingai užsipildė (filled) arba dingo iš aktyvių
             if order_info['status'] == 'closed':
                 print(f"[BE SEKIKLIS] 🔥 TP1 pasiektas! Užsakymas {tp1_order_id} užpildytas. Perkeliamas SL į Breakeven...")
                 tp1_filled = True
                 break
                 
-            # Jei užsakymą atšaukėte rankiniu būdu
             if order_info['status'] == 'canceled':
                 print(f"[BE SEKIKLIS] TP1 užsakymas buvo atšauktas rankiniu būdu. Sekimas stabdomas.")
                 break
                 
         except Exception as err:
-            # Jei birža meta klaidą, kad užsakymo neranda, reiškia jis jau įvykdytas ir išvalytas
             if "Order does not exist" in str(err) or "not found" in str(err).lower():
                 print(f"[BE SEKIKLIS] TP1 užsakymas užpildytas (nerastas aktyviuose). Perkeliamas SL į Breakeven...")
                 tp1_filled = True
@@ -59,20 +51,18 @@ def monitor_tp1_and_set_breakeven(symbol, tp1_order_id, entry_price, current_sl,
             
     if tp1_filled:
         try:
-            # MEXC biržoje keičiant SL/TP pozicijai, tiesiog nusiunčiame naują Stop Loss kainą, lygią įėjimo kainai
-            # Naudojame paramatrus, kurie tiesiogiai atnaujina einamosios SHORT pozicijos stopLoss
             exchange.create_order(
                 symbol=symbol,
-                type='limit', # fjučeriuose pozicijos keitimas vyksta per specialų orderio parametrą
-                side='buy',   # kadangi esame SHORT, uždarymo apsauga yra BUY kryptimi
-                amount=0,     # 0 kiekis MEXC biržoje keičiant parametrą reiškia visos likusios pozicijos SL atnaujinimą
+                type='limit',
+                side='buy',
+                amount=0,
                 price=entry_price,
                 params={
                     'posSide': 'SHORT',
                     'openType': 1,
                     'leverage': int(final_leverage),
-                    'stopLossPrice': entry_price, # NAUJAS SL = ĮĖJIMO KAINA (Breakeven)!
-                    'type': 'EXECUTE_ORDER' # Atnaujinimo komanda fjučeriams
+                    'stopLossPrice': entry_price,
+                    'type': 'EXECUTE_ORDER'
                 }
             )
             print(f"[BE SEKIKLIS] ✅ SĖKMINGAI likusios dalys perkeltos į Breakeven ties kaina: {entry_price}")
@@ -81,7 +71,7 @@ def monitor_tp1_and_set_breakeven(symbol, tp1_order_id, entry_price, current_sl,
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (3x TP + AUTOMATINIS BREAKEVEN)", 200
+    return "BOTAS ONLINE (3x TP + AUTOMATINIS BREAKEVEN - 100% UNIVERSALUS)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -108,8 +98,9 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
+        # --- IŠMANUS IR UNIVERSALUS TICKERIO VALDYMAS (VISOMS MONETOMS) ---
         clean_base = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").upper()
+        
         markets = exchange.load_markets()
         symbol = None
 
@@ -198,7 +189,6 @@ def webhook():
         order_ids = []
         tp1_generated_id = None
 
-        # --- 3 LIMIT ORDERIŲ PATEIKIMAS ---
         for config in tp_configs:
             params = {
                 'posSide': 'SHORT',
@@ -223,13 +213,12 @@ def webhook():
                 
             print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Moneta: {symbol} | Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
 
-        # --- AKTYVUOJAME BE SEKIKLĮ ATSKIRAME SRAUTE (THREAD) ---
         if tp1_generated_id:
             t = threading.Thread(
                 target=monitor_tp1_and_set_breakeven, 
                 args=(symbol, tp1_generated_id, entry_price, sl_price, final_leverage)
             )
-            t.daemon = True # Užtikrina, kad srautas neužkabins serverio išjungimo metu
+            t.daemon = True
             t.start()
 
         return {"status": "success", "symbol": symbol, "order_ids": order_ids}, 200
