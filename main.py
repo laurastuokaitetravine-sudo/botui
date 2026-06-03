@@ -17,8 +17,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 25  
-MARGIN_USDT = 5.0 
+DEFAULT_LEVERAGE = 20  
+MARGIN_USDT = 50.0 
 
 @app.route('/')
 def home():
@@ -62,10 +62,10 @@ def webhook():
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
+        ticker = exchange.fetch_ticker(symbol)
         
-        # --- IŠTAISYTA: Užklausą darome per stabilesnį orderbook API ---
-        orderbook = exchange.fetch_order_book(symbol, 1)
-        entry_price = float(orderbook['asks'][0][0])
+        # Paimame ASK (geriausią pardavimo) kainą
+        entry_price = float(ticker['ask']) 
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -76,21 +76,16 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- IŠTAISYTA: Svertą nustatome prieš pradedant skaičiuoti kiekius ---
-        pos_mode = 2  # SHORT fiksuotas
-        try:
-            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
-        except:
-            pass
-
         # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
         try:
             sl_price = float(data.get('sl_price'))
             
+            # Skaitome TP1, TP2, TP3 lygius iš žinutės
             tp1_raw = data.get('tp_price_1')
             tp2_raw = data.get('tp_price_2')
             tp3_raw = data.get('tp_price_3')
             
+            # Saugikliai: Jei kuris nors TP plotas grafike yra tuščias (na), naudojame atsarginį 0.8% / 1.5% / 2.0% pelną
             tp1_price = float(tp1_raw) if tp1_raw and str(tp1_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.992
             tp2_price = float(tp2_raw) if tp2_raw and str(tp2_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
             tp3_price = float(tp3_raw) if tp3_raw and str(tp3_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.980
@@ -110,21 +105,32 @@ def webhook():
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
         
+        # Bendras kontraktų kiekis
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
 
+        # Padaliname kontraktus į 3 dalis pagal jūsų TV indikatoriaus logiką
         qty_tp1 = total_contracts * 0.70
         qty_tp2 = total_contracts * 0.20
         qty_tp3 = total_contracts * 0.10
 
+        # Užtikriname, kad kiekviena dalis atitiktų minimalų biržos limitą
         qty_tp1 = max(qty_tp1, min_contracts)
         qty_tp2 = max(qty_tp2, min_contracts)
         qty_tp3 = max(qty_tp3, min_contracts)
 
+        # Suapvaliname kiekius pagal biržos žingsnį
         amt_tp1 = float(exchange.amount_to_precision(symbol, qty_tp1))
         amt_tp2 = float(exchange.amount_to_precision(symbol, qty_tp2))
         amt_tp3 = float(exchange.amount_to_precision(symbol, qty_tp3))
 
+        pos_mode = 2  # SHORT fiksuotas
+        try:
+            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
+        except:
+            pass
+
+        # Sukuriame masyvus ciklui, kad kodo apimtis būtų mažesnė
         tp_configs = [
             {"num": 1, "amt": amt_tp1, "tp": tp1_price, "pct": "70%"},
             {"num": 2, "amt": amt_tp2, "tp": tp2_price, "pct": "20%"},
