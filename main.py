@@ -22,7 +22,7 @@ MARGIN_USDT = 50.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (1x TP IŠ PLOT_1, ENTRY IŠ PLOT_2)", 200
+    return "BOTAS ONLINE (1x LIMIT 100%, 1x TP 100% IŠ PLOT_1)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -49,7 +49,7 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-               # --- NAUJA MONETŲ TVARKYMO IR APSAUGOS LOGIKA ---
+        # --- NAUJA MONETŲ TVARKYMO IR APSAUGOS LOGIKA ---
         clean_ticker = str(tv_ticker).upper().strip()
         clean_ticker = clean_ticker.replace(".P", "").replace("_", "").replace("-", "")
         
@@ -71,11 +71,15 @@ def webhook():
                 return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
             market = markets[symbol]
+            
+            # Kaina imama TIK iš biržos (Geriausia pardavimo kaina)
+            ticker = exchange.fetch_ticker(symbol)
+            entry_price = float(ticker['ask'])
+            
         except (ccxt.NetworkError, ccxt.BaseError) as exchange_err:
             print(f"KLAIDA: MEXC birža atmetė užklausą dėl simbolio {symbol}. Detalės: {exchange_err}")
             return {"error": f"Biržos klaida apdorojant {symbol}."}, 400
 
-        
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
@@ -85,20 +89,11 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS IŠ TRADINGVIEW PLOTŲ ---
+        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
         try:
             sl_price = float(data.get('sl_price'))
             
-            # Skaitome ENTRY kainą iš plot_2. Jei nerandame, kaip atsarginį variantą paimame biržos ticker kine
-            entry_raw = data.get('entry_price')
-            if entry_raw and str(entry_raw).strip().lower() not in ['nan', 'na', 'null', '']:
-                entry_price = float(entry_raw)
-            else:
-                ticker = exchange.fetch_ticker(symbol)
-                entry_price = float(ticker['ask'])
-                print("Įspėjimas: Nerasta entry_price žinutėje, naudojama biržos ASK kaina.")
-            
-            # Skaitome TP1 lygį iš plot_1
+            # Skaitome tik vieną TP lygį iš žinutės (plot_1)
             tp_raw = data.get('tp_price_1')
             tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
             
@@ -131,7 +126,7 @@ def webhook():
         except:
             pass
 
-        # --- LIMIT ORDERIO PATEIKIMAS (100% KIEKIO) ---
+        # --- 1 LIMIT ORDERIO PATEIKIMAS (100% KIEKIO) ---
         params = {
             'posSide': 'SHORT',
             'openType': 1,
@@ -150,7 +145,7 @@ def webhook():
             params=params
         )
 
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Biržos Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
 
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
