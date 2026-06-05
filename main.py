@@ -22,7 +22,7 @@ MARGIN_USDT = 100.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (3x TP IŠ INDIKATORIAUS)", 200
+    return "BOTAS ONLINE (1x TP IŠ PLOT_1, ENTRY IŠ PLOT_2)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -62,10 +62,6 @@ def webhook():
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
         market = markets[symbol]
-        ticker = exchange.fetch_ticker(symbol)
-        
-        # Paimame ASK (geriausią pardavimo) kainą
-        entry_price = float(ticker['ask']) 
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -76,19 +72,22 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
+        # --- DUOMENŲ SKAITYMAS IŠ TRADINGVIEW PLOTŲ ---
         try:
             sl_price = float(data.get('sl_price'))
             
-            # Skaitome TP1, TP2, TP3 lygius iš žinutės
-            tp1_raw = data.get('tp_price_1')
-            tp2_raw = data.get('tp_price_2')
-            tp3_raw = data.get('tp_price_3')
+            # Skaitome ENTRY kainą iš plot_2. Jei nerandame, kaip atsarginį variantą paimame biržos ticker kine
+            entry_raw = data.get('entry_price')
+            if entry_raw and str(entry_raw).strip().lower() not in ['nan', 'na', 'null', '']:
+                entry_price = float(entry_raw)
+            else:
+                ticker = exchange.fetch_ticker(symbol)
+                entry_price = float(ticker['ask'])
+                print("Įspėjimas: Nerasta entry_price žinutėje, naudojama biržos ASK kaina.")
             
-            # Saugikliai: Jei kuris nors TP plotas grafike yra tuščias (na), naudojame atsarginį 0.8% / 1.5% / 2.0% pelną
-            tp1_price = float(tp1_raw) if tp1_raw and str(tp1_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.992
-            tp2_price = float(tp2_raw) if tp2_raw and str(tp2_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
-            tp3_price = float(tp3_raw) if tp3_raw and str(tp3_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.980
+            # Skaitome TP1 lygį iš plot_1
+            tp_raw = data.get('tp_price_1')
+            tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
             
         except (TypeError, ValueError):
             return {"error": "Klaida: Žinutėje gauti blogi kainų formatai"}, 400
@@ -96,33 +95,22 @@ def webhook():
         # Suapvaliname kainas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
-        tp1_price = float(exchange.price_to_precision(symbol, tp1_price))
-        tp2_price = float(exchange.price_to_precision(symbol, tp2_price))
-        tp3_price = float(exchange.price_to_precision(symbol, tp3_price))
+        tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- KIEKIO IR PROPORCIJŲ SKAIČIAVIMAS (70% / 20% / 10%) ---
+        # --- KIEKIO SKAČIAVIMAS (100% pozicijos) ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
         
-        # Bendras kontraktų kiekis
+        # Bendras kontraktų kiekis 100% pozicijai
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
 
-        # Padaliname kontraktus į 3 dalis pagal jūsų TV indikatoriaus logiką
-        qty_tp1 = total_contracts * 0.70
-        qty_tp2 = total_contracts * 0.20
-        qty_tp3 = total_contracts * 0.10
+        # Užtikriname, kad kiekis atitiktų minimalų biržos limitą
+        total_contracts = max(total_contracts, min_contracts)
 
-        # Užtikriname, kad kiekviena dalis atitiktų minimalų biržos limitą
-        qty_tp1 = max(qty_tp1, min_contracts)
-        qty_tp2 = max(qty_tp2, min_contracts)
-        qty_tp3 = max(qty_tp3, min_contracts)
-
-        # Suapvaliname kiekius pagal biržos žingsnį
-        amt_tp1 = float(exchange.amount_to_precision(symbol, qty_tp1))
-        amt_tp2 = float(exchange.amount_to_precision(symbol, qty_tp2))
-        amt_tp3 = float(exchange.amount_to_precision(symbol, qty_tp3))
+        # Suapvaliname kiekį pagal biržos žingsnį
+        final_amount = float(exchange.amount_to_precision(symbol, total_contracts))
 
         pos_mode = 2  # SHORT fiksuotas
         try:
@@ -130,38 +118,28 @@ def webhook():
         except:
             pass
 
-        # Sukuriame masyvus ciklui, kad kodo apimtis būtų mažesnė
-        tp_configs = [
-            {"num": 1, "amt": amt_tp1, "tp": tp1_price, "pct": "70%"},
-            {"num": 2, "amt": amt_tp2, "tp": tp2_price, "pct": "20%"},
-            {"num": 3, "amt": amt_tp3, "tp": tp3_price, "pct": "10%"}
-        ]
+        # --- LIMIT ORDERIO PATEIKIMAS (100% KIEKIO) ---
+        params = {
+            'posSide': 'SHORT',
+            'openType': 1,
+            'leverage': int(final_leverage),
+            'stopLossPrice': sl_price,
+            'takeProfitPrice': tp_price,
+            'timeInForce': 'PostOnly'  
+        }
 
-        order_ids = []
+        order = exchange.create_order(
+            symbol=symbol,
+            type='limit',       
+            side='sell',
+            amount=final_amount,
+            price=entry_price,  
+            params=params
+        )
 
-        # --- 3 ATSKIRŲ LIMIT ORDERIŲ PATEIKIMAS ---
-        for config in tp_configs:
-            params = {
-                'posSide': 'SHORT',
-                'openType': 1,
-                'leverage': int(final_leverage),
-                'stopLossPrice': sl_price,
-                'takeProfitPrice': config["tp"],
-                'timeInForce': 'PostOnly'  
-            }
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
 
-            order = exchange.create_order(
-                symbol=symbol,
-                type='limit',       
-                side='sell',
-                amount=config["amt"],
-                price=entry_price,  
-                params=params
-            )
-            order_ids.append(order['id'])
-            print(f"SHORT LIMIT TP{config['num']} ({config['pct']}) pastatytas! Kiekis: {config['amt']} | SL: {sl_price} | TP: {config['tp']}")
-
-        return {"status": "success", "symbol": symbol, "order_ids": order_ids}, 200
+        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
