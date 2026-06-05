@@ -18,7 +18,7 @@ exchange = ccxt.mexc({
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 20  
-MARGIN_USDT = 100.0 
+MARGIN_USDT = 50.0 
 
 @app.route('/')
 def home():
@@ -49,19 +49,32 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
-        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+               # --- NAUJA MONETŲ TVARKYMO IR APSAUGOS LOGIKA ---
+        clean_ticker = str(tv_ticker).upper().strip()
+        clean_ticker = clean_ticker.replace(".P", "").replace("_", "").replace("-", "")
+        
+        # Saugus USDT nukirpimas, kad neliktų GMEUSDT/USDT
+        if clean_ticker.endswith("USDT"):
+            clean_ticker = clean_ticker[:-4]
+            
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
             
         symbol = f"{clean_ticker}/USDT:USDT"
+        print(f"Apdorotas signalas monetai: {symbol}")
 
-        markets = exchange.load_markets()
-        if symbol not in markets:
-            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
-            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
+        # Apsauga nuo neegzistuojančių monetų ir tinklo klaidų (pvz., NICKEL)
+        try:
+            markets = exchange.load_markets()
+            if symbol not in markets:
+                print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
+                return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
-        market = markets[symbol]
+            market = markets[symbol]
+        except (ccxt.NetworkError, ccxt.BaseError) as exchange_err:
+            print(f"KLAIDA: MEXC birža atmetė užklausą dėl simbolio {symbol}. Detalės: {exchange_err}")
+            return {"error": f"Biržos klaida apdorojant {symbol}."}, 400
+
         
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
