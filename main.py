@@ -79,15 +79,23 @@ def webhook():
 
         print(f"Naudojamas simbolis: {symbol}")
 
-        # --- RINKOS DUOMENYS ---
+               # --- RINKOS DUOMENYS (Atnaujinta) ---
         try:
             market = markets[symbol]
-            ticker = exchange.fetch_ticker(symbol)
-            entry_price = float(ticker['ask'])
+            
+            # Naudojame Orderbook, nes fetch_ticker adresas MEXC biržoje yra pasenęs
+            orderbook = exchange.fetch_order_book(symbol, limit=5)
+            
+            if orderbook and orderbook['asks']:
+                entry_price = float(orderbook['asks'][0][0])  # Geriausia pardavimo kaina
+            else:
+                ticker_direct = exchange.contractPublicGetTicker({'symbol': market['id']})
+                entry_price = float(ticker_direct['data']['askPrice'])
 
-        except (ccxt.NetworkError, ccxt.BaseError) as exchange_err:
-            print(f"KLAIDA: MEXC birža atmetė užklausą dėl simbolio {symbol}. Detalės: {exchange_err}")
-            return {"error": f"Biržos klaida apdorojant {symbol}."}, 400
+        except Exception as exchange_err:
+            print(f"KLAIDA: Nepavyko gauti kainos simboliui {symbol}. Detalės: {exchange_err}")
+            return {"error": f"Biržos klaida gaunant {symbol} kainą."}, 400
+
 
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
