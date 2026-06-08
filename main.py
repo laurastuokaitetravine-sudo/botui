@@ -139,14 +139,15 @@ def webhook():
         except:
             pass
 
-        # --- LIMIT ORDERIS ---
+                # --- LIMIT ORDERIS (PASTATOMAS ANT GELTONOS LINIJOS KAIP NĖRA CANCEL) ---
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly'
+            'timeInForce': 'PostOnly',
+            'triggerType': 'MARK_PRICE'  # 🛡️ Stop Loss sekamas pagal saugesnę Žymėjimo kainą!
         }
 
         order = exchange.create_order(
@@ -154,17 +155,18 @@ def webhook():
             type='limit',
             side='sell',
             amount=final_amount,
-            price=entry_price,
+            price=tv_entry,  # 🎯 Užsifiksuoja tiksli geltonos linijos kaina iš TradingView!
             params=params
         )
 
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
+        print(f"🚀 SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {tv_entry} | SL: {sl_price} | TP: {tp_price}")
 
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
+
 
 
 if __name__ == '__main__':
