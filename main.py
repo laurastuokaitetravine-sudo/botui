@@ -1,20 +1,31 @@
 import os
 import json
 import traceback
+import time
 from flask import Flask, request
 import ccxt
 
 app = Flask(__name__)
 
-# --- KONFIGŪRACIJA (Naudojant Render Environment Variables) ---
-exchange = ccxt.mexc({
+# --- SAUGI KEITYKLOS KONFIGŪRACIJA ---
+exchange_config = {
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
     'options': {
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
+    },
+    'timeout': 30000  # Padidiname laukimo laiką iki 30 sekundžių
+}
+
+# Automatiškai prijungiame proxy, jei jis įvestas Render nustatymuose
+if os.getenv('PROXY_URL'):
+    exchange_config['proxies'] = {
+        'http': os.getenv('PROXY_URL'),
+        'https': os.getenv('PROXY_URL'),
     }
-})
+
+exchange = ccxt.mexc(exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5  
@@ -22,7 +33,7 @@ MARGIN_USDT = 100.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (1x LIMIT 100%, 1x TP 100% IŠ PLOT_1)", 200
+    return "BOTAS ONLINE (1x LIMIT 100%, 1x TP 100% IŠ PLOT_1, AUTO TP 50%)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -49,22 +60,36 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
+        # Monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
             
         symbol = f"{clean_ticker}/USDT:USDT"
 
-        markets = exchange.load_markets()
-        if symbol not in markets:
-            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
-            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
+        # --- SAUGUS DUOMENŲ KROVIMAS SU TRIS KARTUS KARTAS (RETRIES) ---
+        markets = None
+        ticker = None
+        
+        for attempt in range(3):
+            try:
+                if not markets:
+                    markets = exchange.load_markets()
+                ticker = exchange.fetch_ticker(symbol)
+                break  # Jei pavyko, stabdome ciklą
+            except ccxt.NetworkError as ne:
+                print(f"Tinklo klaida su MEXC (Bandymas {attempt + 1}/3): {ne}")
+                if attempt < 2:
+                    time.sleep(3)  # Palaukiame 3 sekundes prieš bandant vėl
+            except Exception as e:
+                print(f"Kita API klaida: {e}")
+                break
+
+        if not markets or symbol not in markets or not ticker:
+            print("KLAIDA: Nepavyko susisiekti su MEXC. Patikrinkite PROXY_URL nustatymus.")
+            return {"error": "MEXC API blocked. Check proxy settings."}, 400
 
         market = markets[symbol]
-        
-        # Paimame ASK (geriausią pardavimo) kainą tiesiai iš biržos
-        ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['ask'])
         
         # Sverto tikrinimas
@@ -74,46 +99,38 @@ def webhook():
                 max_leverage = int(market['limits']['leverage']['max'])
 
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
-        print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
+        # --- KAINŲ SKAITYMAS IR APVALINIMAS ---
         try:
             sl_price = float(data.get('sl_price'))
-            
-            # Skaitome tik TP1 lygį iš plot_1
             tp_raw = data.get('tp_price_1')
-            tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
             
+            # PAKEISTA: Jei TP reikšmė tuščia arba nan, nustatome 50% žemesnę kainą nuo įėjimo taško
+            tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.50
         except (TypeError, ValueError):
-            return {"error": "Klaida: Žinutėje gauti blogi kainų formatai"}, 400
+            return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        # Suapvaliname kainas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- KIEKIO SKAČIAVIMAS (100% pozicijos) ---
+        # --- KIEKIO SKAIČIAVIMAS ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
         
-        # Bendras kontraktų kiekis 100% pozicijai
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
-
-        # Užtikriname, kad kiekis atitiktų minimalų biržos limitą
         total_contracts = max(total_contracts, min_contracts)
-
-        # Suapvaliname kiekį pagal biržos žingsnį
         final_amount = float(exchange.amount_to_precision(symbol, total_contracts))
 
-        pos_mode = 2  # SHORT fiksuotas
+        # Nustatome svertą biržoje
         try:
-            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
+            exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': 2})
         except:
             pass
 
-        # --- LIMIT ORDERIO PATEIKIMAS (100% KIEKIO) ---
+        # --- LIMIT ORDERIO PATEIKIMAS ---
         params = {
             'posSide': 'SHORT',
             'openType': 1,
@@ -132,8 +149,7 @@ def webhook():
             params=params
         )
 
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Biržos Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
-
+        print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis: {final_amount} | Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
