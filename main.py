@@ -17,8 +17,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 10
-MARGIN_USDT = 5.0
+DEFAULT_LEVERAGE = 20  
+MARGIN_USDT = 10.0 
 
 @app.route('/')
 def home():
@@ -28,7 +28,7 @@ def home():
 def webhook():
     try:
         data = request.get_json(force=True, silent=True)
-
+        
         if not data:
             try:
                 raw_data = request.data.decode('utf-8').strip()
@@ -39,7 +39,7 @@ def webhook():
 
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
-
+        
         action = str(data.get('action', '')).lower()
         if action != 'short':
             return "Ignored (Only SHORT allowed)", 200
@@ -49,54 +49,24 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # --- NAUJA MONETŲ TVARKYMO IR APSAUGOS LOGIKA ---
-        clean_ticker = str(tv_ticker).upper().strip()
-        clean_ticker = clean_ticker.replace(".P", "").replace("_", "").replace("-", "")
-
-        # Saugus USDT nukirpimas, kad neliktų GMEUSDT/USDT
-        if clean_ticker.endswith("USDT"):
-            clean_ticker = clean_ticker[:-4]
-
+        # Universali monetų tvarkymo logika
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
+            
+        symbol = f"{clean_ticker}/USDT:USDT"
 
-        # --- AUTOMATINIS SIMBOLIO APTIKIMAS (3 formatai) ---
         markets = exchange.load_markets()
+        if symbol not in markets:
+            print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
+            return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
-        symbol1 = f"{clean_ticker}USDT"
-        symbol2 = f"{clean_ticker}USDT.P"
-        symbol3 = f"{clean_ticker}/USDT:USDT"
-
-        if symbol1 in markets:
-            symbol = symbol1
-        elif symbol2 in markets:
-            symbol = symbol2
-        elif symbol3 in markets:
-            symbol = symbol3
-        else:
-            print(f"Klaida: {clean_ticker} nerastas jokiu formatu")
-            return {"error": f"Symbol {clean_ticker} not found on MEXC"}, 400
-
-        print(f"Naudojamas simbolis: {symbol}")
-
-               # --- RINKOS DUOMENYS (Atnaujinta) ---
-        try:
-            market = markets[symbol]
-            
-            # Naudojame Orderbook, nes fetch_ticker adresas MEXC biržoje yra pasenęs
-            orderbook = exchange.fetch_order_book(symbol, limit=5)
-            
-            if orderbook and orderbook['asks']:
-                entry_price = float(orderbook['asks'][0][0])  # Geriausia pardavimo kaina
-            else:
-                ticker_direct = exchange.contractPublicGetTicker({'symbol': market['id']})
-                entry_price = float(ticker_direct['data']['askPrice'])
-
-        except Exception as exchange_err:
-            print(f"KLAIDA: Nepavyko gauti kainos simboliui {symbol}. Detalės: {exchange_err}")
-            return {"error": f"Biržos klaida gaunant {symbol} kainą."}, 400
-
-
+        market = markets[symbol]
+        
+        # Paimame ASK (geriausią pardavimo) kainą tiesiai iš biržos
+        ticker = exchange.fetch_ticker(symbol)
+        entry_price = float(ticker['ask'])
+        
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
         if 'limits' in market and 'leverage' in market['limits']:
@@ -106,68 +76,69 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS IŠ TRADINGVIEW ---
+        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
         try:
             sl_price = float(data.get('sl_price'))
-
+            
+            # Skaitome tik TP1 lygį iš plot_1
             tp_raw = data.get('tp_price_1')
             tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
-
+            
         except (TypeError, ValueError):
             return {"error": "Klaida: Žinutėje gauti blogi kainų formatai"}, 400
 
-        # Suapvaliname kainas pagal biržos taisykles
+        # Suapvaliname kainas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
 
-        # --- KIEKIO SKAIČIAVIMAS ---
+        # --- KIEKIO SKAČIAVIMAS (100% pozicijos) ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
-
+        
+        # Bendras kontraktų kiekis 100% pozicijai
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
 
+        # Užtikriname, kad kiekis atitiktų minimalų biržos limitą
         total_contracts = max(total_contracts, min_contracts)
 
+        # Suapvaliname kiekį pagal biržos žingsnį
         final_amount = float(exchange.amount_to_precision(symbol, total_contracts))
 
-        pos_mode = 2  # SHORT
+        pos_mode = 2  # SHORT fiksuotas
         try:
             exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
-                # --- LIMIT ORDERIS (PASTATOMAS ANT GELTONOS LINIJOS KAIP NĖRA CANCEL) ---
+        # --- LIMIT ORDERIO PATEIKIMAS (100% KIEKIO) ---
         params = {
             'posSide': 'SHORT',
             'openType': 1,
             'leverage': int(final_leverage),
             'stopLossPrice': sl_price,
             'takeProfitPrice': tp_price,
-            'timeInForce': 'PostOnly',
-            'triggerType': 'MARK_PRICE'  # 🛡️ Stop Loss sekamas pagal saugesnę Žymėjimo kainą!
+            'timeInForce': 'PostOnly'  
         }
 
         order = exchange.create_order(
             symbol=symbol,
-            type='limit',
+            type='limit',       
             side='sell',
             amount=final_amount,
-            price=tv_entry,  # 🎯 Užsifiksuoja tiksli geltonos linijos kaina iš TradingView!
+            price=entry_price,  
             params=params
         )
 
-        print(f"🚀 SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {tv_entry} | SL: {sl_price} | TP: {tp_price}")
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Biržos Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
 
         return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
         return {"error": str(e)}, 400
-
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
