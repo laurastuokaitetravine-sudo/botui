@@ -28,8 +28,8 @@ if os.getenv('PROXY_URL'):
 exchange = ccxt.mexc(exchange_config)
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 5  
-MARGIN_USDT = 100.0 
+DEFAULT_LEVERAGE = 25
+MARGIN_USDT = 50.0 
 
 @app.route('/')
 def home():
