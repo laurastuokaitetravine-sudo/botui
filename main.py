@@ -12,7 +12,7 @@ DEFAULT_LEVERAGE = 25
 MARGIN_USDT = 50.0
 
 # ============================================================
-# VIEŠAS KLIENTAS KAINAI (SU PROXY, BE API KEY, TIK FUTURES)
+# VIEŠAS KLIENTAS KAINAI (BE API KEY, SU HTTP PROXY, TIK FUTURES)
 # ============================================================
 
 public_exchange = ccxt.mexc({
@@ -35,7 +35,7 @@ public_exchange = ccxt.mexc({
 })
 
 # ============================================================
-# PRIVATUS KLIENTAS ORDERIAMS (SU API KEY + PROXY, TIK FUTURES)
+# PRIVATUS KLIENTAS ORDERIAMS (SU API KEY, SU HTTP PROXY, TIK FUTURES)
 # ============================================================
 
 private_exchange = ccxt.mexc({
@@ -62,7 +62,7 @@ private_exchange = ccxt.mexc({
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (FUTURES ONLY, FIXED)", 200
+    return "BOTAS ONLINE (FUTURES ONLY, FULL FIX)", 200
 
 
 @app.route('/webhook', methods=['POST'])
@@ -90,7 +90,7 @@ def webhook():
         symbol = f"{clean}/USDT:USDT"
 
         # ============================================================
-        # GAUNAME KAINĄ IŠ VIEŠO FUTURES KLIENTO (NEBEKVIEČIA SPOT)
+        # GAUNAME KAINĄ IŠ FUTURES PUBLIC API (NEBEKVIEČIA SPOT)
         # ============================================================
 
         ticker = None
@@ -106,6 +106,10 @@ def webhook():
             return {"error": "Nepavyko gauti kainos"}, 400
 
         entry_price = float(ticker['ask'])
+
+        # ============================================================
+        # SL IR TP IŠ TAVO PINE PLOT()
+        # ============================================================
 
         sl_price = float(data.get('sl_price'))
         tp_raw = data.get('tp_price_1')
@@ -125,20 +129,7 @@ def webhook():
             amount = 1.0
 
         # ============================================================
-        # LEVERAGE
-        # ============================================================
-
-        try:
-            private_exchange.set_leverage(
-                int(DEFAULT_LEVERAGE),
-                symbol,
-                {'openType': 1, 'positionType': 2}
-            )
-        except Exception as e:
-            print(f"Sverto klaida: {e}")
-
-        # ============================================================
-        # LIMIT SHORT ORDERIS
+        # LIMIT SHORT ORDERIS (SU LEVERAGE PARAMS)
         # ============================================================
 
         entry_order = private_exchange.create_order(
@@ -148,6 +139,8 @@ def webhook():
             amount=amount,
             price=entry_price,
             params={
+                'marginMode': 'isolated',
+                'leverage': int(DEFAULT_LEVERAGE),
                 'posSide': 'SHORT',
                 'openType': 1,
                 'timeInForce': 'PostOnly'
@@ -155,7 +148,7 @@ def webhook():
         )
 
         # ============================================================
-        # STOP LOSS (trigger market)
+        # STOP LOSS (trigger market, SU LEVERAGE PARAMS)
         # ============================================================
 
         sl_order = private_exchange.create_order(
@@ -164,6 +157,8 @@ def webhook():
             side='buy',
             amount=amount,
             params={
+                'marginMode': 'isolated',
+                'leverage': int(DEFAULT_LEVERAGE),
                 'stopPrice': sl_price,
                 'triggerPrice': sl_price,
                 'posSide': 'SHORT',
@@ -172,7 +167,7 @@ def webhook():
         )
 
         # ============================================================
-        # TAKE PROFIT (trigger market)
+        # TAKE PROFIT (trigger market, SU LEVERAGE PARAMS)
         # ============================================================
 
         tp_order = private_exchange.create_order(
@@ -181,6 +176,8 @@ def webhook():
             side='buy',
             amount=amount,
             params={
+                'marginMode': 'isolated',
+                'leverage': int(DEFAULT_LEVERAGE),
                 'stopPrice': tp_price,
                 'triggerPrice': tp_price,
                 'posSide': 'SHORT',
