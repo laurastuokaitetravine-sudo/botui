@@ -26,8 +26,8 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 10
-MARGIN_USDT = 10.0
+DEFAULT_LEVERAGE = 15
+MARGIN_USDT = 75.0
 
 @app.route('/')
 def home():
