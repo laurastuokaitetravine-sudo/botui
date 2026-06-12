@@ -12,11 +12,11 @@ exchange_config = {
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
     'options': {
+        # ŠIS PARAMETRAS PRIVERČIA CCXT DIRBTI TIK SU FUTURES IR NEIEŠKOTI SPOT DUOMENŲ:
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
     },
     'timeout': 30000,  # Padidiname laukimo laiką iki 30 sekundžių
-    # --- PRIDĖTOS ŠIOS DVI EILUTĖS LAIKO IR PARAŠO KLAIDOMS IŠTAISYTI ---
     'enableRateLimit': True,
     'adjustForTimeDifference': True 
 }
@@ -77,6 +77,8 @@ def webhook():
         for attempt in range(3):
             try:
                 if not markets:
+                    # Nurodome, kad krautų tik ateities sandorių rinkas
+                    exchange.options['defaultType'] = 'swap'
                     markets = exchange.load_markets()
                 ticker = exchange.fetch_ticker(symbol)
                 break  # Jei pavyko, stabdome ciklą
@@ -85,7 +87,7 @@ def webhook():
                 if attempt < 2:
                     time.sleep(3)  # Palaukiame 3 sekundes prieš bandant vėl
             except Exception as e:
-                print(f"Kita API klaida: {e}")
+                print(f"Kita API klaida krovimo metu: {e}")
                 break
 
         if not markets or symbol not in markets or not ticker:
