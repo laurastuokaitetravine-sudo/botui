@@ -15,7 +15,10 @@ exchange_config = {
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
     },
-    'timeout': 30000  # Padidiname laukimo laiką iki 30 sekundžių
+    'timeout': 30000,  # Padidiname laukimo laiką iki 30 sekundžių
+    # --- PRIDĖTOS ŠIOS DVI EILUTĖS LAIKO IR PARAŠO KLAIDOMS IŠTAISYTI ---
+    'enableRateLimit': True,
+    'adjustForTimeDifference': True 
 }
 
 # Automatiškai prijungiame proxy, jei jis įvestas Render nustatymuose
