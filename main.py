@@ -14,7 +14,6 @@ MARGIN_USDT = 100.0           # kiek USDT skiri pozicijai (be sverto)
 # ============================================================
 # PUBLIC CLIENT – TIK KAINAI (FUTURES ONLY, SU PROXY)
 # ============================================================
-
 public_exchange = ccxt.mexc({
     'enableRateLimit': True,
     'timeout': 30000,
@@ -25,8 +24,8 @@ public_exchange = ccxt.mexc({
     },
     'urls': {
         'api': {
-            'public': 'https://contract.mexc.com',
-            'private': 'https://contract.mexc.com'
+            'public': 'https://mexc.com',
+            'private': 'https://mexc.com'
         }
     },
     'proxies': {
@@ -38,7 +37,6 @@ public_exchange = ccxt.mexc({
 # ============================================================
 # PRIVATE CLIENT – ORDERIAMS (FUTURES ONLY, SU PROXY)
 # ============================================================
-
 private_exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_API_SECRET'),
@@ -51,8 +49,8 @@ private_exchange = ccxt.mexc({
     },
     'urls': {
         'api': {
-            'public': 'https://contract.mexc.com',
-            'private': 'https://contract.mexc.com'
+            'public': 'https://mexc.com',
+            'private': 'https://mexc.com'
         }
     },
     'proxies': {
@@ -195,7 +193,7 @@ def webhook():
             print(f"Sverto nustatymo klaida: {e}")
 
         # ========================================================
-        # 1) LIMIT SHORT ENTRY (ŠVARUS, BE SL/TP PARAMS)
+        # 1) LIMIT SHORT ENTRY
         # ========================================================
         entry_params = {
             'posSide': 'SHORT',
@@ -213,11 +211,10 @@ def webhook():
             price=entry_price,
             params=entry_params
         )
-
         print(f"[ENTRY] SHORT LIMIT: {symbol} | qty={final_amount} | price={entry_price}")
 
         # ========================================================
-        # 2) STOP LOSS – ATSKIRAS TRIGGER ORDERIS
+        # 2) STOP LOSS – TRIGGER ORDERIS
         # ========================================================
         sl_params = {
             'marginMode': 'isolated',
@@ -235,11 +232,10 @@ def webhook():
             amount=final_amount,
             params=sl_params
         )
-
         print(f"[SL] STOP MARKET: {symbol} | qty={final_amount} | stop={sl_price}")
 
         # ========================================================
-        # 3) TAKE PROFIT – ATSKIRAS TRIGGER ORDERIS
+        # 3) TAKE PROFIT – TRIGGER ORDERIS
         # ========================================================
         tp_params = {
             'marginMode': 'isolated',
@@ -257,22 +253,21 @@ def webhook():
             amount=final_amount,
             params=tp_params
         )
-
-        print(f"[TP] TAKE PROFIT MARKET: {symbol} | qty={final_amount} | tp={tp_price}")
+        print(f"[TP] TAKE PROFIT MARKET: {symbol} | qty={final_amount} | trigger={tp_price}")
 
         return {
             "status": "success",
-            "symbol": symbol,
-            "entry_id": entry_order['id'],
-            "sl_id": sl_order['id'],
-            "tp_id": tp_order['id']
+            "message": "Visi trys orderiai sėkmingai išsiųsti",
+            "entry_order_id": entry_order.get('id'),
+            "sl_order_id": sl_order.get('id'),
+            "tp_order_id": tp_order.get('id')
         }, 200
 
     except Exception as e:
-        print("KLAIDA:\n", traceback.format_exc())
-        return {"error": str(e)}, 400
+        print("Kritinė klaida webhook apdorojime:")
+        traceback.print_exc()
+        return {"error": str(e)}, 500
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000, debug=True)
