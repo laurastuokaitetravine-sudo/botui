@@ -7,7 +7,7 @@ import ccxt
 app = Flask(__name__)
 
 # ============================================================
-# EXCHANGE KONFIGŪRACIJA (SU PROXY IR TAVO PARAMETRAIS)
+# EXCHANGE KONFIGŪRACIJA (SU PROXY IR TAVO SENUOTU LIMIT EP)
 # ============================================================
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -18,7 +18,6 @@ exchange = ccxt.mexc({
         'defaultType': 'swap',
         'createMarketBuyOrderRequiresPrice': False
     },
-    # PROXY nustatymai, kurie išspręs Render blokavimo problemą:
     'proxies': {
         'http': os.getenv('PROXY_URL'),
         'https': os.getenv('PROXY_URL'),
@@ -26,12 +25,12 @@ exchange = ccxt.mexc({
 })
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 100
-MARGIN_USDT = 7.0
+DEFAULT_LEVERAGE = 5
+MARGIN_USDT = 10.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (1x LIMIT 100%, 1x TP 100% IŠ PLOT_1 SU PROXY)", 200
+    return "BOTAS ONLINE (GYVAS LIMIT ENTRY + SL IŠ PLOT SU PROXY)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -45,6 +44,9 @@ def webhook():
             except Exception as json_err:
                 print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
                 return {"error": "Invalid JSON format"}, 400
+
+        # Gyvas duomenų spausdinimas į Render logus stebėjimui
+        print(f"GAUTI DUOMENYS IŠ TRADINGVIEW: {data}")
 
         if not data or data.get('passphrase') != MY_PASSWORD:
             return "Unauthorized", 403
@@ -72,9 +74,23 @@ def webhook():
 
         market = markets[symbol]
 
-        # Paimame ASK (geriausią pardavimo) kainą tiesiai iš biržos
+        # 🟢 SENASIS EP BŪDAS: Paimame gyvą ASK kainą iš biržos LIMIT orderiui
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['ask'])
+
+        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TAVO KODO PLOTO ---
+        sl_raw = data.get('sl_price')
+
+        # Patikriname STOP LOSS (SL) iš kodo plot_0
+        if sl_raw and str(sl_raw).strip().lower() not in ['nan', 'na', 'null', '']:
+            sl_price = float(sl_raw)
+        else:
+            print(f"KLAIDA: Iš kodo plot gautas tuščias arba sugadintas SL: '{sl_raw}'. Orderis stabdomas.")
+            return {"error": "Stabdoma: Nerasta SL reikšmė iš plot"}, 400
+
+        # Suapvaliname kainas pagal tikslias biržos taisykles (Precision)
+        entry_price = float(exchange.price_to_precision(symbol, entry_price))
+        sl_price = float(exchange.price_to_precision(symbol, sl_price))
 
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
@@ -85,23 +101,7 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TRADINGVIEW PLOTŲ ---
-        try:
-            sl_price = float(data.get('sl_price'))
-
-            # Skaitome tik TP1 lygį iš plot_1
-            tp_raw = data.get('tp_price_1')
-            tp_price = float(tp_raw) if tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', ''] else entry_price * 0.985
-
-        except (TypeError, ValueError):
-            return {"error": "Klaida: Žinutėje gauti blogi kainų formatai"}, 400
-
-        # Suapvaliname kainas pagal tikslias biržos taisykles
-        entry_price = float(exchange.price_to_precision(symbol, entry_price))
-        sl_price = float(exchange.price_to_precision(symbol, sl_price))
-        tp_price = float(exchange.price_to_precision(symbol, tp_price))
-
-        # --- KIEKIO SKAČIAVIMAS (100% pozicijos) ---
+        # --- KIEKIO SKAIČIAVIMAS (100% pozicijos) ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
@@ -122,28 +122,52 @@ def webhook():
         except:
             pass
 
-        # --- LIMIT ORDERIO PATEIKIMAS (SU INTEGRUOTAIS SL IR TP PARAMETRAIS) ---
-        params = {
+        # ========================================================
+        # 1) BASE LIMIT SHORT ENTRY ORDER (GYVA KAINA, BET LIMIT ORDERIS!)
+        # ========================================================
+        entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'leverage': int(final_leverage),
-            'stopLossPrice': sl_price,
-            'takeProfitPrice': tp_price,
             'timeInForce': 'PostOnly'
         }
 
-        order = exchange.create_order(
+        entry_order = exchange.create_order(
             symbol=symbol,
-            type='limit',
+            type='limit',  # Čia stovi tavo norimas LIMIT!
             side='sell',
             amount=final_amount,
             price=entry_price,
-            params=params
+            params=entry_params
         )
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
 
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Biržos Kaina: {entry_price} | SL: {sl_price} | TP: {tp_price}")
+        # ========================================================
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS IŠ KODO PLOTO
+        # ========================================================
+        sl_params = {
+            'openType': 1,
+            'stopPrice': sl_price,
+            'triggerPrice': sl_price,
+            'posSide': 'SHORT',
+            'reduceOnly': True,
+            'type': 5  # 5 = TRIGGER MARKET užsakymas MEXC biržoje
+        }
 
-        return {"status": "success", "symbol": symbol, "order_id": order['id']}, 200
+        sl_order = exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='buy',
+            amount=final_amount,
+            params=sl_params
+        )
+        print(f"[SL TRIGGER] STOP MARKET pastatytas už kodo plot kainą: {sl_price}")
+
+        return {
+            "status": "success", 
+            "symbol": symbol, 
+            "entry_id": entry_order['id'],
+            "sl_id": sl_order['id']
+        }, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
