@@ -24,7 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
-# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
+# Užkrauname rinkas tik kartą, kad serveris „nepavargtų“
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -72,7 +72,6 @@ def webhook():
         # ========================================================
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").strip()
         
-        # Tikriname specifines išimtis
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
         elif clean_ticker == "GEV":
@@ -85,7 +84,7 @@ def webhook():
         if not exchange.markets:
             exchange.load_markets()
 
-        # AUTOMATINIS AKCIJŲ SAUGIKLIS: Jei paprasto simbolio nėra, tikriname su STOCK galūne
+        # AUTOMATINIS AKCIJŲ SAUGIKLIS
         if symbol not in exchange.markets:
             alternative_ticker = f"{clean_ticker}STOCK"
             alternative_symbol = f"{alternative_ticker}/USDT:USDT"
@@ -100,10 +99,18 @@ def webhook():
         market = exchange.markets[symbol]
 
         # ========================================================
-        # LIMIT ENTRY KAINA IŠ markPrice (NE ask) → be 2007 klaidos
+        # SAUGUS KAINOS GAVIMAS SU ATSARGINIAIS VARIANTAS (NO NONE)
         # ========================================================
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['markPrice'])
+        
+        # Tikriname laukus iš eilės, kad išvengtume NoneType klaidos
+        raw_price = ticker.get('markPrice') or ticker.get('ask') or ticker.get('last') or ticker.get('close')
+        
+        if raw_price is None:
+            print(f"KLAIDA: Nepavyko gauti jokios kainos monetai {symbol} iš MEXC API.")
+            return {"error": "Nepavyko gauti biržos kainos"}, 400
+            
+        entry_price = float(raw_price)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
 
         # ========================================================
