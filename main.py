@@ -24,7 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
-# Užkrauname rinkas tik kartą, kad serveris „nepavargtų“
+# Užkrauname rinkas tik kartą starto metu
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -99,11 +99,9 @@ def webhook():
         market = exchange.markets[symbol]
 
         # ========================================================
-        # SAUGUS KAINOS GAVIMAS SU ATSARGINIAIS VARIANTAS (NO NONE)
+        # SAUGUS KAINOS GAVIMAS SU ATSARGINIAIS VARIANTAS
         # ========================================================
         ticker = exchange.fetch_ticker(symbol)
-        
-        # Tikriname laukus iš eilės, kad išvengtume NoneType klaidos
         raw_price = ticker.get('markPrice') or ticker.get('ask') or ticker.get('last') or ticker.get('close')
         
         if raw_price is None:
@@ -178,22 +176,24 @@ def webhook():
         print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {entry_price}")
 
         # ========================================================
-        # 2) TEISINGAS STOP LOSS TRIGGER MARKET ORDERIS (MEXC FUTURES)
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS (PATAISYTAS!)
         # ========================================================
+        sl_params = {
+            'openType': 1,
+            'marginMode': 'isolated',
+            'leverage': int(final_leverage),
+            'stopPrice': sl_price,
+            'triggerPrice': sl_price,
+            'posSide': 'SHORT',
+            'type': 5  # 🔴 5 praneša MEXC Futures, kad tai sąlyginis Rinkos užsakymas
+        }
+
         sl_order = exchange.create_order(
             symbol=symbol,
-            type='trigger',
+            type='market',  # 🔴 Pataisyta: bazinis užsakymo tipas pakeistas į 'market'
             side='buy',
             amount=final_amount,
-            params={
-                'triggerPrice': sl_price,
-                'stopPrice': sl_price,
-                'orderType': 1,      # 1 = market
-                'execPrice': 0,      # market execution
-                'posSide': 'SHORT',
-                'marginMode': 'isolated',
-                'openType': 1
-            }
+            params=sl_params
         )
         print(f"[SL TRIGGER] STOP MARKET pastatytas už kodo plot kainą: {sl_price}")
 
