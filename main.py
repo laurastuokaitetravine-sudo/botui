@@ -24,7 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
-# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
+# Svarbus optimizavimas: užkrauname rinkas tik kartą starto metu
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -67,12 +67,8 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # ========================================================
-        # UNIVERSALI MONETŲ IR AKCIJŲ TVARKYMO LOGIKA (PATAISYTA!)
-        # ========================================================
+        # Universali monetų ir akcijų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").strip()
-        
-        # Tikriname specifines kriptovaliutų ir akcijų išimtis
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
         elif clean_ticker == "GEV":
@@ -82,7 +78,6 @@ def webhook():
 
         symbol = f"{clean_ticker}/USDT:USDT"
 
-        # Jei po kelių dienų atmintis išsivalė, užkrauname saugiai iš naujo
         if not exchange.markets:
             exchange.load_markets()
 
@@ -136,19 +131,19 @@ def webhook():
             pass
 
         # ========================================================
-        # 1) BASE LIMIT SHORT ENTRY ORDER (PATAISYTAS!)
+        # 1) BASE LIMIT SHORT ENTRY ORDER (PATAISYTAS VARIANTAS!)
         # ========================================================
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'marginMode': 'isolated',         # Pridėta maržos būsena
-            'leverage': int(final_leverage),  # 🟢 Įrašytas privalomas svertas!
+            'marginMode': 'isolated',
+            'leverage': int(final_leverage),  # 🟢 ČIA ĮRAŠYTAS TRŪKSTAMAS SVERTAS LIMIT ORDERIUI!
             'timeInForce': 'PostOnly'
         }
 
         entry_order = exchange.create_order(
             symbol=symbol,
-            type='limit',
+            type='limit',  # <--- TAVO NORIMAS LIMIT ORDERIS
             side='sell',
             amount=final_amount,
             price=entry_price,
@@ -157,12 +152,12 @@ def webhook():
         print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
 
         # ========================================================
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS (PATAISYTAS!)
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
         # ========================================================
         sl_params = {
             'openType': 1,
-            'marginMode': 'isolated',         # Pridėta maržos būsena
-            'leverage': int(final_leverage),  # Įrašytas svertas sąlyginiam orderiui
+            'marginMode': 'isolated',
+            'leverage': int(final_leverage),  # Svertas įrašytas ir sąlyginiam orderiui
             'stopPrice': sl_price,
             'triggerPrice': sl_price,
             'posSide': 'SHORT',
