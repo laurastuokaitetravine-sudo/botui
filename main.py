@@ -24,6 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
+# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -66,8 +67,12 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų ir akcijų tvarkymo logika
+        # ========================================================
+        # UNIVERSALI MONETŲ IR AKCIJŲ TVARKYMO LOGIKA
+        # ========================================================
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").strip()
+        
+        # Tikriname specifines išimtis
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
         elif clean_ticker == "GEV":
@@ -79,6 +84,14 @@ def webhook():
 
         if not exchange.markets:
             exchange.load_markets()
+
+        # AUTOMATINIS AKCIJŲ SAUGIKLIS: Jei paprasto simbolio nėra, tikriname su STOCK galūne
+        if symbol not in exchange.markets:
+            alternative_ticker = f"{clean_ticker}STOCK"
+            alternative_symbol = f"{alternative_ticker}/USDT:USDT"
+            if alternative_symbol in exchange.markets:
+                symbol = alternative_symbol
+                print(f"Automatiškai pritaikyta akcijų galūnė: {symbol}")
 
         if symbol not in exchange.markets:
             print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
@@ -94,16 +107,20 @@ def webhook():
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
 
         # ========================================================
-        # STOP LOSS IŠ TAVO PLOT (NEKEIČIAM)
+        # STOP LOSS IŠ TAVO INDIKATORIAUS (SAUGUS BLOKAS)
         # ========================================================
         sl_raw = data.get('sl_price')
 
-        if sl_raw and str(sl_raw).strip().lower() not in ['nan', 'na', 'null', '']:
-            sl_price = float(sl_raw)
-        else:
-            print(f"KLAIDA: Iš kodo plot gautas tuščias arba sugadintas SL: '{sl_raw}'. Orderis stabdomas.")
-            return {"error": "Stabdoma: Nerasta SL reikšmė iš plot"}, 400
+        if sl_raw is None:
+            print("KLAIDA: indikatorius atsiuntė SL = None (plot dar nespėjo apskaičiuoti)")
+            return {"error": "SL iš indikatoriaus negautas"}, 400
 
+        sl_raw_str = str(sl_raw).strip().lower()
+        if sl_raw_str in ["", "na", "nan", "null"]:
+            print(f"KLAIDA: indikatorius atsiuntė sugadintą SL: {sl_raw}")
+            return {"error": "SL iš indikatoriaus yra neteisingas"}, 400
+
+        sl_price = float(sl_raw)
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
 
         # Sverto tikrinimas
@@ -158,7 +175,7 @@ def webhook():
         # ========================================================
         sl_order = exchange.create_order(
             symbol=symbol,
-            type='trigger',          # ← svarbu
+            type='trigger',
             side='buy',
             amount=final_amount,
             params={
