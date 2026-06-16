@@ -24,7 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
-# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
+# Svarbus optimizavimas: užkrauname rinkas tik kartą
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -33,7 +33,7 @@ except Exception as e:
     print(f"Įspėjimas: Nepavyko užkrauti rinkų starto metu: {e}")
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 5
+DEFAULT_LEVERAGE = 7
 MARGIN_USDT = 10.0
 
 @app.route('/')
@@ -84,11 +84,11 @@ def webhook():
 
         market = exchange.markets[symbol]
 
-        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui per proxy
+        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['ask'])
 
-        # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TAVO KODO PLOTO ---
+        # --- DUOMENŲ SKAITYMAS IŠ PLOT ---
         sl_raw = data.get('sl_price')
 
         if sl_raw and str(sl_raw).strip().lower() not in ['nan', 'na', 'null', '']:
@@ -97,7 +97,7 @@ def webhook():
             print(f"KLAIDA: Iš kodo plot gautas tuščias arba sugadintas SL: '{sl_raw}'. Orderis stabdomas.")
             return {"error": "Stabdoma: Nerasta SL reikšmė iš plot"}, 400
 
-        # Suapvaliname kainas pagal tikslias biržos taisykles
+        # Suapvaliname kainas
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
 
@@ -131,7 +131,9 @@ def webhook():
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'timeInForce': 'PostOnly'
+            'timeInForce': 'PostOnly',
+            'marginMode': 'isolated',
+            'leverage': int(final_leverage)
         }
 
         entry_order = exchange.create_order(
@@ -142,30 +144,29 @@ def webhook():
             price=entry_price,
             params=entry_params
         )
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {entry_price}")
 
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
-        sl_params = {
-            'openType': 1,
-            'stopPrice': sl_price,
-            'triggerPrice': sl_price,
-            'posSide': 'SHORT',
-            'reduceOnly': True,
-            'type': 5
-        }
-
+        # 2) STOP LOSS TRIGGER MARKET ORDER
         sl_order = exchange.create_order(
             symbol=symbol,
-            type='market',
+            type=5,
             side='buy',
             amount=final_amount,
-            params=sl_params
+            params={
+                'triggerPrice': sl_price,
+                'stopPrice': sl_price,
+                'posSide': 'SHORT',
+                'reduceOnly': True,
+                'openType': 1,
+                'marginMode': 'isolated',
+                'leverage': int(final_leverage)
+            }
         )
         print(f"[SL TRIGGER] STOP MARKET pastatytas už kodo plot kainą: {sl_price}")
 
         return {
-            "status": "success", 
-            "symbol": symbol, 
+            "status": "success",
+            "symbol": symbol,
             "entry_id": entry_order['id'],
             "sl_id": sl_order['id']
         }, 200
