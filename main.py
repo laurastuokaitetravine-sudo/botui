@@ -44,7 +44,7 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5
-MARGIN_USDT = 20.0 
+MARGIN_USDT = 10.0 
 
 @app.route('/')
 def home():
@@ -107,20 +107,20 @@ def webhook():
         except:
             return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        # BTC ar kitų monetų tikslus kainų apvalinimas
+        # Apvaliname kainas (BTC naudoja 1 arba 2 ženklus po kablelio futures rinkoje)
         entry_price = round(entry_price, 2 if "BTC" in symbol else 4)
         sl_price = round(sl_price, 2 if "BTC" in symbol else 4)
         if tp_price is not None:
             tp_price = round(tp_price, 2 if "BTC" in symbol else 4)
 
         # --- KIEKIO SKAIČIAVIMAS ---
-        total_value = MARGIN_USDT * DEFAULT_LEVERAGE
+        total_value = MARGIN_USDT * DEFAULT_LEVERAGE  # 50 USDT * 25x = 1250 USDT vertė
         raw_crypto_amount = total_value / entry_price
         
-        # Kontraktų kiekis (BTC dažniausiai leidžia iki 3–4 ženklų po kablelio, pvz., 0.01 BTC)
-        final_amount = round(raw_crypto_amount, 3 if "BTC" in symbol else 0)
+        # PAKEISTA ČIA: MEXC reikalauja, kad kontraktų kiekis būtų sveikas skaičius (minimum 1)
+        final_amount = int(round(raw_crypto_amount, 0))
         if final_amount <= 0:
-            final_amount = 0.001 if "BTC" in symbol else 1.0
+            final_amount = 1
 
         # --- SVERTO NUSTATYMAS FONE ---
         try:
@@ -131,13 +131,14 @@ def webhook():
         # Atsakymo objektas, kurį grąžinsime
         response_data = {
             "status": "success",
-            "symbol": symbol
+            "symbol": symbol,
+            "calculated_amount": final_amount
         }
 
         # --- 1. LIMIT SHORT ORDERIS ---
         entry_order = private_exchange.create_order(
             symbol=symbol,
-            type='limit',  # 1 / limit
+            type='limit',
             side='sell',
             amount=final_amount,
             price=entry_price,
@@ -150,43 +151,41 @@ def webhook():
         )
         response_data["entry_id"] = entry_order['id']
 
-        # --- 2. STOP LOSS ORDERIS (SIUNČIAMAS KAIP TRIGGER/MARKET) ---
+        # --- 2. STOP LOSS ORDERIS ---
         sl_order = private_exchange.create_order(
             symbol=symbol,
-            type='market',  # Paverčiame į rinkos tipą, nes tai bus stabdymo trigeris
+            type='market',
             side='buy',
             amount=final_amount,
             params={
                 'posSide': 'SHORT',
                 'leverage': int(DEFAULT_LEVERAGE),
                 'reduceOnly': True,
-                # Specialūs MEXC parametrai Stop Loss aktyvavimui:
                 'stopPrice': sl_price,
                 'triggerType': 'trade'  
             }
         )
         response_data["sl_id"] = sl_order['id']
 
-        # --- 3. TAKE PROFIT ORDERIS (SIUNČIAMAS KAIP TRIGGER/MARKET) ---
+        # --- 3. TAKE PROFIT ORDERIS ---
         if tp_price is not None:
             tp_order = private_exchange.create_order(
                 symbol=symbol,
-                type='market',  # Paverčiame į rinkos tipą pelno paėmimui
+                type='market',
                 side='buy',
                 amount=final_amount,
                 params={
                     'posSide': 'SHORT',
                     'leverage': int(DEFAULT_LEVERAGE),
                     'reduceOnly': True,
-                    # Specialūs MEXC parametrai Take Profit aktyvavimui:
                     'stopPrice': tp_price,
                     'triggerType': 'trade'
                 }
             )
             response_data["tp_id"] = tp_order['id']
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! SL: {sl_price} | TP: {tp_price}")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis kontraktų: {final_amount} | SL: {sl_price} | TP: {tp_price}")
         else:
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! SL: {sl_price} | TP: Nenustatytas")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis kontraktų: {final_amount} | SL: {sl_price} | TP: Nenustatytas")
 
         return response_data, 200
 
