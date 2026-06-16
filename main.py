@@ -44,7 +44,7 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5
-MARGIN_USDT = 10.0 
+MARGIN_USDT = 15.0 
 
 @app.route('/')
 def home():
@@ -107,7 +107,7 @@ def webhook():
         except:
             return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        # Apvaliname kainas (BTC naudoja 1 arba 2 ženklus po kablelio futures rinkoje)
+        # Tikslus kainų apvalinimas pagal MEXC standartus
         entry_price = round(entry_price, 2 if "BTC" in symbol else 4)
         sl_price = round(sl_price, 2 if "BTC" in symbol else 4)
         if tp_price is not None:
@@ -117,7 +117,7 @@ def webhook():
         total_value = MARGIN_USDT * DEFAULT_LEVERAGE  # 50 USDT * 25x = 1250 USDT vertė
         raw_crypto_amount = total_value / entry_price
         
-        # PAKEISTA ČIA: MEXC reikalauja, kad kontraktų kiekis būtų sveikas skaičius (minimum 1)
+        # Kontraktų kiekis visada turi būti sveikasis skaičius MEXC Futures rinkoje
         final_amount = int(round(raw_crypto_amount, 0))
         if final_amount <= 0:
             final_amount = 1
@@ -151,7 +151,7 @@ def webhook():
         )
         response_data["entry_id"] = entry_order['id']
 
-        # --- 2. STOP LOSS ORDERIS ---
+        # --- 2. STOP LOSS ORDERIS (SU TEISINGAIS PARAMETRAIS) ---
         sl_order = private_exchange.create_order(
             symbol=symbol,
             type='market',
@@ -162,12 +162,13 @@ def webhook():
                 'leverage': int(DEFAULT_LEVERAGE),
                 'reduceOnly': True,
                 'stopPrice': sl_price,
-                'triggerType': 'trade'  
+                # IŠTAISYTA: MEXC specifinis saugus parametras triggeriavimui
+                'executeCycle': 1  
             }
         )
         response_data["sl_id"] = sl_order['id']
 
-        # --- 3. TAKE PROFIT ORDERIS ---
+        # --- 3. TAKE PROFIT ORDERIS (SU TEISINGAIS PARAMETRAIS) ---
         if tp_price is not None:
             tp_order = private_exchange.create_order(
                 symbol=symbol,
@@ -179,7 +180,8 @@ def webhook():
                     'leverage': int(DEFAULT_LEVERAGE),
                     'reduceOnly': True,
                     'stopPrice': tp_price,
-                    'triggerType': 'trade'
+                    # IŠTAISYTA: MEXC specifinis saugus parametras triggeriavimui
+                    'executeCycle': 1
                 }
             )
             response_data["tp_id"] = tp_order['id']
