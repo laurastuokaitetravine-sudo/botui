@@ -44,7 +44,7 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5
-MARGIN_USDT = 10.0 
+MARGIN_USDT = 5.0 
 
 @app.route('/')
 def home():
@@ -99,8 +99,6 @@ def webhook():
         # --- KAINŲ SKAITYMAS IR APVALINIMAS ---
         try:
             sl_price = float(data.get('sl_price'))
-            
-            # PAKEISTA ČIA: Dabar kodas ieško tikslaus pavadinimo 'tp_price', kurį atsiunčia TradingView
             tp_raw = data.get('tp_price')
             
             # Patikriname, ar TP kaina ateina iš TradingView
@@ -121,11 +119,11 @@ def webhook():
         if final_amount < 1:
             final_amount = 1.0
 
-        # --- SVERTO NUSTATYMAS ---
+        # --- SVERTO NUSTATYMAS FONE ---
         try:
             private_exchange.set_leverage(int(DEFAULT_LEVERAGE), symbol, {'openType': 1, 'positionType': 2})
         except Exception as lev_err:
-            print(f"Sverto žinutė: {lev_err}")
+            print(f"Sverto žinutė fone: {lev_err}")
 
         # Atsakymo objektas, kurį grąžinsime
         response_data = {
@@ -133,7 +131,7 @@ def webhook():
             "symbol": symbol
         }
 
-        # --- 1. LIMIT SHORT ORDERIS ---
+        # --- 1. LIMIT SHORT ORDERIS (SU ĮRAŠYTU SVERTU) ---
         entry_order = private_exchange.create_order(
             symbol=symbol,
             type='limit',
@@ -143,12 +141,13 @@ def webhook():
             params={
                 'posSide': 'SHORT',
                 'openType': 1,
+                'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
                 'timeInForce': 'PostOnly'
             }
         )
         response_data["entry_id"] = entry_order['id']
 
-        # --- 2. STOP LOSS ORDERIS ---
+        # --- 2. STOP LOSS ORDERIS (SU ĮRAŠYTU SVERTU) ---
         sl_order = private_exchange.create_order(
             symbol=symbol,
             type='stop_market',
@@ -158,12 +157,13 @@ def webhook():
                 'stopPrice': sl_price,
                 'triggerPrice': sl_price,
                 'posSide': 'SHORT',
+                'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
                 'reduceOnly': True
             }
         )
         response_data["sl_id"] = sl_order['id']
 
-        # --- 3. TAKE PROFIT ORDERIS ---
+        # --- 3. TAKE PROFIT ORDERIS (SU ĮRAŠYTU SVERTU) ---
         if tp_price is not None:
             tp_order = private_exchange.create_order(
                 symbol=symbol,
@@ -174,13 +174,14 @@ def webhook():
                     'stopPrice': tp_price,
                     'triggerPrice': tp_price,
                     'posSide': 'SHORT',
+                    'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
                     'reduceOnly': True
                 }
             )
             response_data["tp_id"] = tp_order['id']
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP (Plot_1): {tp_price}")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP: {tp_price}")
         else:
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP: Nenustatytas (Trūksta duomenų žinutėje)")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP: Nenustatytas (Trūksta žinutėje)")
 
         return response_data, 200
 
