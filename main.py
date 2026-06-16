@@ -34,7 +34,7 @@ except Exception as e:
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 7
-MARGIN_USDT = 10.0
+MARGIN_USDT = 1.0
 
 @app.route('/')
 def home():
@@ -68,15 +68,17 @@ def webhook():
             return {"error": "Missing ticker in request"}, 400
 
         # ========================================================
-        # UNIVERSALI MONETŲ TVARKYMO LOGIKA (PATAISYTA AKCIJOMS!)
+        # UNIVERSALI MONETŲ IR AKCIJŲ TVARKYMO LOGIKA (PATAISYTA!)
         # ========================================================
-        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").strip()
         
-        # Tikriname specifines MEXC monetų ir akcijų indeksų išimtis
+        # Tikriname specifines kriptovaliutų ir akcijų išimtis
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
         elif clean_ticker == "GEV":
             clean_ticker = "GEVSTOCK"
+        elif clean_ticker == "AAOI":
+            clean_ticker = "AAOISTOCK"
 
         symbol = f"{clean_ticker}/USDT:USDT"
 
@@ -133,10 +135,14 @@ def webhook():
         except:
             pass
 
-        # 1) BASE LIMIT SHORT ENTRY ORDER
+        # ========================================================
+        # 1) BASE LIMIT SHORT ENTRY ORDER (PATAISYTAS!)
+        # ========================================================
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
+            'marginMode': 'isolated',         # Pridėta maržos būsena
+            'leverage': int(final_leverage),  # 🟢 Įrašytas privalomas svertas!
             'timeInForce': 'PostOnly'
         }
 
@@ -150,9 +156,13 @@ def webhook():
         )
         print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
 
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
+        # ========================================================
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS (PATAISYTAS!)
+        # ========================================================
         sl_params = {
             'openType': 1,
+            'marginMode': 'isolated',         # Pridėta maržos būsena
+            'leverage': int(final_leverage),  # Įrašytas svertas sąlyginiam orderiui
             'stopPrice': sl_price,
             'triggerPrice': sl_price,
             'posSide': 'SHORT',
