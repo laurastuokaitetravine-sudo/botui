@@ -7,7 +7,7 @@ import ccxt
 app = Flask(__name__)
 
 # ============================================================
-# EXCHANGE KONFIGŪRACIJA (SU PROXY IR TAVO SENUOTU LIMIT EP)
+# EXCHANGE KONFIGŪRACIJA (SU PROXY IR OPTIMIZUOTA ATMINTIMI)
 # ============================================================
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -24,13 +24,21 @@ exchange = ccxt.mexc({
     }
 })
 
+# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
+try:
+    print("Kraunami MEXC Futures rinkos duomenys...")
+    exchange.load_markets()
+    print("Rinkos sėkmingai užkrautos!")
+except Exception as e:
+    print(f"Įspėjimas: Nepavyko užkrauti rinkų starto metu: {e}")
+
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 5
+DEFAULT_LEVERAGE = 7
 MARGIN_USDT = 10.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (GYVAS LIMIT ENTRY + SL IŠ PLOT SU PROXY)", 200
+    return "BOTAS ONLINE (STABILUS GYVAS LIMIT ENTRY + SL IŠ PLOT SU PROXY)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -45,7 +53,6 @@ def webhook():
                 print(f"Nepavyko konvertuoti teksto į JSON: {json_err}")
                 return {"error": "Invalid JSON format"}, 400
 
-        # Gyvas duomenų spausdinimas į Render logus stebėjimui
         print(f"GAUTI DUOMENYS IŠ TRADINGVIEW: {data}")
 
         if not data or data.get('passphrase') != MY_PASSWORD:
@@ -67,28 +74,30 @@ def webhook():
 
         symbol = f"{clean_ticker}/USDT:USDT"
 
-        markets = exchange.load_markets()
-        if symbol not in markets:
+        # Jei po kelių dienų atmintis išsivalė, užkrauname saugiai iš naujo
+        if not exchange.markets:
+            exchange.load_markets()
+
+        if symbol not in exchange.markets:
             print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
             return {"error": f"Symbol {symbol} not found on MEXC"}, 400
 
-        market = markets[symbol]
+        market = exchange.markets[symbol]
 
-        # 🟢 SENASIS EP BŪDAS: Paimame gyvą ASK kainą iš biržos LIMIT orderiui
+        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui per proxy
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['ask'])
 
         # --- DUOMENŲ SKAITYMAS TIESIAI IŠ TAVO KODO PLOTO ---
         sl_raw = data.get('sl_price')
 
-        # Patikriname STOP LOSS (SL) iš kodo plot_0
         if sl_raw and str(sl_raw).strip().lower() not in ['nan', 'na', 'null', '']:
             sl_price = float(sl_raw)
         else:
             print(f"KLAIDA: Iš kodo plot gautas tuščias arba sugadintas SL: '{sl_raw}'. Orderis stabdomas.")
             return {"error": "Stabdoma: Nerasta SL reikšmė iš plot"}, 400
 
-        # Suapvaliname kainas pagal tikslias biržos taisykles (Precision)
+        # Suapvaliname kainas pagal tikslias biržos taisykles
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
 
@@ -101,19 +110,15 @@ def webhook():
         final_leverage = min(DEFAULT_LEVERAGE, max_leverage)
         print(f"Monetai {symbol} taikomas svertas: {final_leverage}x")
 
-        # --- KIEKIO SKAIČIAVIMAS (100% pozicijos) ---
+        # --- KIEKIO SKAČIAVIMAS ---
         total_value = MARGIN_USDT * final_leverage
         raw_crypto_amount = total_value / entry_price
         contract_size = float(market.get('contractSize', 1.0))
 
-        # Bendras kontraktų kiekis 100% pozicijai
         total_contracts = raw_crypto_amount / contract_size
         min_contracts = float(market['limits']['amount']['min'])
-
-        # Užtikriname, kad kiekis atitiktų minimalų biržos limitą
         total_contracts = max(total_contracts, min_contracts)
 
-        # Suapvaliname kiekį pagal biržos žingsnį
         final_amount = float(exchange.amount_to_precision(symbol, total_contracts))
 
         pos_mode = 2  # SHORT fiksuotas
@@ -122,9 +127,7 @@ def webhook():
         except:
             pass
 
-        # ========================================================
-        # 1) BASE LIMIT SHORT ENTRY ORDER (GYVA KAINA, BET LIMIT ORDERIS!)
-        # ========================================================
+        # 1) BASE LIMIT SHORT ENTRY ORDER
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
@@ -133,7 +136,7 @@ def webhook():
 
         entry_order = exchange.create_order(
             symbol=symbol,
-            type='limit',  # Čia stovi tavo norimas LIMIT!
+            type='limit',
             side='sell',
             amount=final_amount,
             price=entry_price,
@@ -141,16 +144,14 @@ def webhook():
         )
         print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
 
-        # ========================================================
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS IŠ KODO PLOTO
-        # ========================================================
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
         sl_params = {
             'openType': 1,
             'stopPrice': sl_price,
             'triggerPrice': sl_price,
             'posSide': 'SHORT',
             'reduceOnly': True,
-            'type': 5  # 5 = TRIGGER MARKET užsakymas MEXC biržoje
+            'type': 5
         }
 
         sl_order = exchange.create_order(
