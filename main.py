@@ -44,7 +44,7 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 5
-MARGIN_USDT = 25.0 
+MARGIN_USDT = 10.0 
 
 @app.route('/')
 def home():
@@ -107,17 +107,20 @@ def webhook():
         except:
             return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        entry_price = round(entry_price, 4)
-        sl_price = round(sl_price, 4)
+        # BTC ar kitų monetų tikslus kainų apvalinimas
+        entry_price = round(entry_price, 2 if "BTC" in symbol else 4)
+        sl_price = round(sl_price, 2 if "BTC" in symbol else 4)
         if tp_price is not None:
-            tp_price = round(tp_price, 4)
+            tp_price = round(tp_price, 2 if "BTC" in symbol else 4)
 
         # --- KIEKIO SKAIČIAVIMAS ---
         total_value = MARGIN_USDT * DEFAULT_LEVERAGE
         raw_crypto_amount = total_value / entry_price
-        final_amount = round(raw_crypto_amount, 0)
-        if final_amount < 1:
-            final_amount = 1.0
+        
+        # Kontraktų kiekis (BTC dažniausiai leidžia iki 3–4 ženklų po kablelio, pvz., 0.01 BTC)
+        final_amount = round(raw_crypto_amount, 3 if "BTC" in symbol else 0)
+        if final_amount <= 0:
+            final_amount = 0.001 if "BTC" in symbol else 1.0
 
         # --- SVERTO NUSTATYMAS FONE ---
         try:
@@ -131,57 +134,59 @@ def webhook():
             "symbol": symbol
         }
 
-        # --- 1. LIMIT SHORT ORDERIS (SU ĮRAŠYTU SVERTU) ---
+        # --- 1. LIMIT SHORT ORDERIS ---
         entry_order = private_exchange.create_order(
             symbol=symbol,
-            type='limit',
+            type='limit',  # 1 / limit
             side='sell',
             amount=final_amount,
             price=entry_price,
             params={
                 'posSide': 'SHORT',
                 'openType': 1,
-                'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
+                'leverage': int(DEFAULT_LEVERAGE),
                 'timeInForce': 'PostOnly'
             }
         )
         response_data["entry_id"] = entry_order['id']
 
-        # --- 2. STOP LOSS ORDERIS (SU ĮRAŠYTU SVERTU) ---
+        # --- 2. STOP LOSS ORDERIS (SIUNČIAMAS KAIP TRIGGER/MARKET) ---
         sl_order = private_exchange.create_order(
             symbol=symbol,
-            type='stop_market',
+            type='market',  # Paverčiame į rinkos tipą, nes tai bus stabdymo trigeris
             side='buy',
             amount=final_amount,
             params={
-                'stopPrice': sl_price,
-                'triggerPrice': sl_price,
                 'posSide': 'SHORT',
-                'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
-                'reduceOnly': True
+                'leverage': int(DEFAULT_LEVERAGE),
+                'reduceOnly': True,
+                # Specialūs MEXC parametrai Stop Loss aktyvavimui:
+                'stopPrice': sl_price,
+                'triggerType': 'trade'  
             }
         )
         response_data["sl_id"] = sl_order['id']
 
-        # --- 3. TAKE PROFIT ORDERIS (SU ĮRAŠYTU SVERTU) ---
+        # --- 3. TAKE PROFIT ORDERIS (SIUNČIAMAS KAIP TRIGGER/MARKET) ---
         if tp_price is not None:
             tp_order = private_exchange.create_order(
                 symbol=symbol,
-                type='take_profit_market',
+                type='market',  # Paverčiame į rinkos tipą pelno paėmimui
                 side='buy',
                 amount=final_amount,
                 params={
-                    'stopPrice': tp_price,
-                    'triggerPrice': tp_price,
                     'posSide': 'SHORT',
-                    'leverage': int(DEFAULT_LEVERAGE),  # <--- IŠTAISYTA: perduodame svertą čia
-                    'reduceOnly': True
+                    'leverage': int(DEFAULT_LEVERAGE),
+                    'reduceOnly': True,
+                    # Specialūs MEXC parametrai Take Profit aktyvavimui:
+                    'stopPrice': tp_price,
+                    'triggerType': 'trade'
                 }
             )
             response_data["tp_id"] = tp_order['id']
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP: {tp_price}")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! SL: {sl_price} | TP: {tp_price}")
         else:
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas! SL: {sl_price} | TP: Nenustatytas (Trūksta žinutėje)")
+            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! SL: {sl_price} | TP: Nenustatytas")
 
         return response_data, 200
 
