@@ -24,7 +24,6 @@ exchange = ccxt.mexc({
     }
 })
 
-# Svarbus optimizavimas: užkrauname rinkas tik kartą starto metu
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -38,7 +37,7 @@ MARGIN_USDT = 10.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (STABILUS GYVAS LIMIT ENTRY + SL IŠ PLOT SU PROXY)", 200
+    return "BOTAS ONLINE (STABILUS GYVAS LIMIT ENTRY + FIX SL SU PROXY)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -124,45 +123,45 @@ def webhook():
 
         final_amount = float(exchange.amount_to_precision(symbol, total_contracts))
 
-        pos_mode = 2  # SHORT fiksuotas
+        pos_mode = 2  # SHORT One-Way / isolated fiksuotas
         try:
             exchange.set_leverage(int(final_leverage), symbol, {'openType': 1, 'positionType': pos_mode})
         except:
             pass
 
         # ========================================================
-        # 1) BASE LIMIT SHORT ENTRY ORDER (PATAISYTAS VARIANTAS!)
+        # 1) BASE LIMIT SHORT ENTRY ORDER
         # ========================================================
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
             'marginMode': 'isolated',
-            'leverage': int(final_leverage),  # 🟢 ČIA ĮRAŠYTAS TRŪKSTAMAS SVERTAS LIMIT ORDERIUI!
+            'leverage': int(final_leverage),
             'timeInForce': 'PostOnly'
         }
 
         entry_order = exchange.create_order(
             symbol=symbol,
-            type='limit',  # <--- TAVO NORIMAS LIMIT ORDERIS
+            type='limit',
             side='sell',
             amount=final_amount,
             price=entry_price,
             params=entry_params
         )
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} | Kaina: {entry_price}")
 
         # ========================================================
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS (PATAISYTAS!)
         # ========================================================
         sl_params = {
-            'openType': 1,
+            'openType': 1,                      # Naudojame openType uždarymo aktyvavimui
             'marginMode': 'isolated',
-            'leverage': int(final_leverage),  # Svertas įrašytas ir sąlyginiam orderiui
+            'leverage': int(final_leverage),
             'stopPrice': sl_price,
             'triggerPrice': sl_price,
             'posSide': 'SHORT',
-            'reduceOnly': True,
-            'type': 5
+            # 🟢 PATAISYMAS: Panaikintas reduceOnly, kad birža priimtų SL iš anksto, kol Limit pildosi
+            'type': 5  # 5 = Trigger Market užsakymas MEXC biržoje
         }
 
         sl_order = exchange.create_order(
