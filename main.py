@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import traceback
 from flask import Flask, request
 import ccxt
@@ -84,22 +85,42 @@ def webhook():
 
         market = exchange.markets[symbol]
 
-        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui
+        # Paimame gyvą ticker
         ticker = exchange.fetch_ticker(symbol)
-        entry_price = float(ticker['ask'])
+        bid = float(ticker['bid'])
+        ask = float(ticker['ask'])
+
+        # Tick size ir kainų limitai
+        price_limits = market.get('limits', {}).get('price', {})
+        tick_size = float(price_limits.get('min', market.get('precision', {}).get('price', 0.0001)))
+        min_price = float(price_limits.get('min', 0.0))
+        max_price = float(price_limits.get('max', 1e9))
+
+        # --- ENTRY KAINA (LIMIT SELL SHORT) ---
+        # Naudojam bid ir pakeliam per vieną tick, kad būtų valid ir PostOnly
+        raw_entry_price = bid + tick_size
+        # Apvalinam pagal tick size
+        entry_price = math.floor(raw_entry_price / tick_size) * tick_size
+        entry_price = max(min(entry_price, max_price), min_price)
 
         # --- DUOMENŲ SKAITYMAS IŠ PLOT ---
         sl_raw = data.get('sl_price')
 
         if sl_raw and str(sl_raw).strip().lower() not in ['nan', 'na', 'null', '']:
-            sl_price = float(sl_raw)
+            sl_price_raw = float(sl_raw)
         else:
             print(f"KLAIDA: Iš kodo plot gautas tuščias arba sugadintas SL: '{sl_raw}'. Orderis stabdomas.")
             return {"error": "Stabdoma: Nerasta SL reikšmė iš plot"}, 400
 
-        # Suapvaliname kainas
+        # SL apvalinimas pagal tick size ir limitus
+        sl_price = math.floor(sl_price_raw / tick_size) * tick_size
+        sl_price = max(min(sl_price, max_price), min_price)
+
+        # Suapvaliname pagal biržos precision (saugumo dvigubas sluoksnis)
         entry_price = float(exchange.price_to_precision(symbol, entry_price))
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
+
+        print(f"ENTRY PRICE (po tick ir precision): {entry_price}, SL PRICE: {sl_price}")
 
         # Sverto tikrinimas
         max_leverage = DEFAULT_LEVERAGE
