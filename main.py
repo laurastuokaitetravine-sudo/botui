@@ -29,7 +29,7 @@ private_exchange_config = {
     'secret': os.getenv('MEXC_API_SECRET'),
     'enableRateLimit': True,
     'timeout': 30000,
-    'adjustForTimeDifference': True,  # Svarbu: sutvarko parašo/laiko klaidas per proxy
+    'adjustForTimeDifference': True,
     'options': {
         'defaultType': 'swap'
     }
@@ -48,7 +48,7 @@ MARGIN_USDT = 15.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (1x LIMIT 100%, TP TIK IŠ PLOT_1 TIESIAI Į TP_PRICE)", 200
+    return "BOTAS ONLINE (FIXED SINGLE-ORDER SL/TP SYSTEM)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -73,7 +73,6 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
-        # Monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
@@ -101,23 +100,20 @@ def webhook():
             sl_price = float(data.get('sl_price'))
             tp_raw = data.get('tp_price')
             
-            # Patikriname, ar TP kaina ateina iš TradingView
             has_tp = tp_raw and str(tp_raw).strip().lower() not in ['nan', 'na', 'null', '']
             tp_price = float(tp_raw) if has_tp else None
         except:
             return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        # Tikslus kainų apvalinimas pagal MEXC standartus
         entry_price = round(entry_price, 2 if "BTC" in symbol else 4)
         sl_price = round(sl_price, 2 if "BTC" in symbol else 4)
         if tp_price is not None:
             tp_price = round(tp_price, 2 if "BTC" in symbol else 4)
 
         # --- KIEKIO SKAIČIAVIMAS ---
-        total_value = MARGIN_USDT * DEFAULT_LEVERAGE  # 50 USDT * 25x = 1250 USDT vertė
+        total_value = MARGIN_USDT * DEFAULT_LEVERAGE
         raw_crypto_amount = total_value / entry_price
         
-        # Kontraktų kiekis visada turi būti sveikasis skaičius MEXC Futures rinkoje
         final_amount = int(round(raw_crypto_amount, 0))
         if final_amount <= 0:
             final_amount = 1
@@ -128,68 +124,36 @@ def webhook():
         except Exception as lev_err:
             print(f"Sverto žinutė fone: {lev_err}")
 
-        # Atsakymo objektas, kurį grąžinsime
-        response_data = {
-            "status": "success",
-            "symbol": symbol,
-            "calculated_amount": final_amount
+        # Suformuojame bazinius užsakymo parametrus
+        order_params = {
+            'posSide': 'SHORT',
+            'openType': 1,
+            'leverage': int(DEFAULT_LEVERAGE),
+            'timeInForce': 'PostOnly'
         }
 
-        # --- 1. LIMIT SHORT ORDERIS ---
+        # Svarbu: Perduodame SL ir TP tiesiai į pirminį užsakymą pagal CCXT standartą
+        if sl_price:
+            order_params['stopLossPrice'] = sl_price
+        if tp_price:
+            order_params['takeProfitPrice'] = tp_price
+
+        # --- VIENAS BENDRAS ORDERIS (ĮĖJIMAS + SL + TP KARTU) ---
         entry_order = private_exchange.create_order(
             symbol=symbol,
             type='limit',
             side='sell',
             amount=final_amount,
             price=entry_price,
-            params={
-                'posSide': 'SHORT',
-                'openType': 1,
-                'leverage': int(DEFAULT_LEVERAGE),
-                'timeInForce': 'PostOnly'
-            }
+            params=order_params
         )
-        response_data["entry_id"] = entry_order['id']
 
-        # --- 2. STOP LOSS ORDERIS (SU TEISINGAIS PARAMETRAIS) ---
-        sl_order = private_exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='buy',
-            amount=final_amount,
-            params={
-                'posSide': 'SHORT',
-                'leverage': int(DEFAULT_LEVERAGE),
-                'reduceOnly': True,
-                'stopPrice': sl_price,
-                # IŠTAISYTA: MEXC specifinis saugus parametras triggeriavimui
-                'executeCycle': 1  
-            }
-        )
-        response_data["sl_id"] = sl_order['id']
-
-        # --- 3. TAKE PROFIT ORDERIS (SU TEISINGAIS PARAMETRAIS) ---
-        if tp_price is not None:
-            tp_order = private_exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side='buy',
-                amount=final_amount,
-                params={
-                    'posSide': 'SHORT',
-                    'leverage': int(DEFAULT_LEVERAGE),
-                    'reduceOnly': True,
-                    'stopPrice': tp_price,
-                    # IŠTAISYTA: MEXC specifinis saugus parametras triggeriavimui
-                    'executeCycle': 1
-                }
-            )
-            response_data["tp_id"] = tp_order['id']
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis kontraktų: {final_amount} | SL: {sl_price} | TP: {tp_price}")
-        else:
-            print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis kontraktų: {final_amount} | SL: {sl_price} | TP: Nenustatytas")
-
-        return response_data, 200
+        print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis: {final_amount} | SL: {sl_price} | TP: {tp_price}")
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "order_id": entry_order['id']
+        }, 200
 
     except Exception as e:
         print(f"KLAIDA: {traceback.format_exc()}")
