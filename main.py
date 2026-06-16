@@ -7,7 +7,7 @@ import ccxt
 app = Flask(__name__)
 
 # ============================================================
-# EXCHANGE KONFIGŪRACIJA (SU PROXY IR STABILIU PALAIKYMU)
+# EXCHANGE KONFIGŪRACIJA (SU PROXY IR OPTIMIZUOTA ATMINTIMI)
 # ============================================================
 exchange = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -24,7 +24,7 @@ exchange = ccxt.mexc({
     }
 })
 
-# Užkrauname rinkas tik kartą starto metu, kad serveris neužsikištų po kelių dienų
+# Svarbus optimizavimas: užkrauname rinkas tik kartą, kad serveris „nepavargtų“ po kelių dienų
 try:
     print("Kraunami MEXC Futures rinkos duomenys...")
     exchange.load_markets()
@@ -33,12 +33,12 @@ except Exception as e:
     print(f"Įspėjimas: Nepavyko užkrauti rinkų starto metu: {e}")
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 7
+DEFAULT_LEVERAGE = 5
 MARGIN_USDT = 10.0
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (STABILUS GYVAS LIMIT ENTRY + SEPARATE SL IŠ PLOT SU PROXY)", 200
+    return "BOTAS ONLINE (STABILUS GYVAS LIMIT ENTRY + SL IŠ PLOT SU PROXY)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -67,27 +67,16 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų ir akcijų tvarkymo logika
-        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "").strip()
+        # Universali monetų tvarkymo logika
+        clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
-        elif clean_ticker == "GEV":
-            clean_ticker = "GEVSTOCK"
-        elif clean_ticker == "AAOI":
-            clean_ticker = "AAOISTOCK"
 
         symbol = f"{clean_ticker}/USDT:USDT"
 
+        # Jei po kelių dienų atmintis išsivalė, užkrauname saugiai iš naujo
         if not exchange.markets:
             exchange.load_markets()
-
-        # AUTOMATINIS AKCIJŲ SAUGIKLIS
-        if symbol not in exchange.markets:
-            alternative_ticker = f"{clean_ticker}STOCK"
-            alternative_symbol = f"{alternative_ticker}/USDT:USDT"
-            if alternative_symbol in exchange.markets:
-                symbol = alternative_symbol
-                print(f"Automatiškai pritaikyta akcijų galūnė: {symbol}")
 
         if symbol not in exchange.markets:
             print(f"Klaida: Moneta {symbol} nerasta MEXC biržoje")
@@ -95,7 +84,7 @@ def webhook():
 
         market = exchange.markets[symbol]
 
-        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui
+        # Paimame gyvą ASK kainą iš biržos LIMIT orderiui per proxy
         ticker = exchange.fetch_ticker(symbol)
         entry_price = float(ticker['ask'])
 
@@ -138,14 +127,10 @@ def webhook():
         except:
             pass
 
-        # ========================================================
         # 1) BASE LIMIT SHORT ENTRY ORDER
-        # ========================================================
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
-            'marginMode': 'isolated',
-            'leverage': int(final_leverage),
             'timeInForce': 'PostOnly'
         }
 
@@ -157,23 +142,21 @@ def webhook():
             price=entry_price,
             params=entry_params
         )
-        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Kaina: {entry_price}")
+        print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Gyva Biržos Kaina: {entry_price}")
 
-        # ========================================================
-        # 2) PATAISYTAS ATSKIRAS STOP LOSS (PAGAL CCXT MEXC TAIKLES)
-        # ========================================================
+        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS
         sl_params = {
-            'stopPrice': sl_price,          # Trigger kaina
-            'posSide': 'SHORT',             # Pririšta prie SHORT pozicijos
-            'openType': 1,                  # Isolated marža
-            'positionType': 2,              # SHORT kryptis
-            'leverage': int(final_leverage) # Reikalaujamas svertas
+            'openType': 1,
+            'stopPrice': sl_price,
+            'triggerPrice': sl_price,
+            'posSide': 'SHORT',
+            'reduceOnly': True,
+            'type': 5
         }
 
-        # Naudojame CCXT standartinį 'stop_market' tipą, kuris MEXC atveju automatiškai susitvarko per API
         sl_order = exchange.create_order(
             symbol=symbol,
-            type='stop_market',
+            type='market',
             side='buy',
             amount=final_amount,
             params=sl_params
