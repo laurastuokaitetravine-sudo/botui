@@ -139,13 +139,13 @@ def webhook():
             pass
 
         # ========================================================
-        # 1) BASE LIMIT SHORT ENTRY ORDER (SU SVERTO PARAMETRU!)
+        # 1) BASE LIMIT SHORT ENTRY ORDER
         # ========================================================
         entry_params = {
             'posSide': 'SHORT',
             'openType': 1,
             'marginMode': 'isolated',
-            'leverage': int(final_leverage),  # 🟢 Įrašytas privalomas svertas įėjimo orderiui
+            'leverage': int(final_leverage),
             'timeInForce': 'PostOnly'
         }
 
@@ -160,22 +160,20 @@ def webhook():
         print(f"SHORT LIMIT pastatytas! Kiekis: {final_amount} (100%) | Kaina: {entry_price}")
 
         # ========================================================
-        # 2) ATSKIRAS STOP LOSS TRIGGER MARKET ORDERIS (SU SVERTO PARAMETRU!)
+        # 2) PATAISYTAS ATSKIRAS STOP LOSS (PAGAL CCXT MEXC TAIKLES)
         # ========================================================
         sl_params = {
-            'openType': 1,
-            'marginMode': 'isolated',
-            'leverage': int(final_leverage),  # 🟢 Įrašytas privalomas svertas SL orderiui
-            'stopPrice': sl_price,
-            'triggerPrice': sl_price,
-            'posSide': 'SHORT',
-            'reduceOnly': True,
-            'type': 5
+            'stopPrice': sl_price,          # Trigger kaina
+            'posSide': 'SHORT',             # Pririšta prie SHORT pozicijos
+            'openType': 1,                  # Isolated marža
+            'positionType': 2,              # SHORT kryptis
+            'leverage': int(final_leverage) # Reikalaujamas svertas
         }
 
+        # Naudojame CCXT standartinį 'stop_market' tipą, kuris MEXC atveju automatiškai susitvarko per API
         sl_order = exchange.create_order(
             symbol=symbol,
-            type='market',
+            type='stop_market',
             side='buy',
             amount=final_amount,
             params=sl_params
