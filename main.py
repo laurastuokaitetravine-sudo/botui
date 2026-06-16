@@ -67,10 +67,16 @@ def webhook():
             print("Klaida: Žinutėje negautas 'ticker' kintamasis")
             return {"error": "Missing ticker in request"}, 400
 
-        # Universali monetų tvarkymo logika
+        # ========================================================
+        # UNIVERSALI MONETŲ TVARKYMO LOGIKA (PATAISYTA AKCIJOMS!)
+        # ========================================================
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
+        
+        # Tikriname specifines MEXC monetų ir akcijų indeksų išimtis
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
+        elif clean_ticker == "GEV":
+            clean_ticker = "GEVSTOCK"
 
         symbol = f"{clean_ticker}/USDT:USDT"
 
