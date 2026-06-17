@@ -43,12 +43,12 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 10
-MARGIN_USDT = 90.0 
+DEFAULT_LEVERAGE = 10  # Tavo pasirinktas svertas
+MARGIN_USDT = 90.0     # Tavo pasirinkta marža
 
 @app.route('/')
 def home():
-    return "BOTAS ONLINE (FIXED SINGLE-ORDER SL/TP SYSTEM)", 200
+    return "BOTAS ONLINE (1x LIMIT 100%, TP TIK IŠ PLOT_1 TIESIAI Į TP_PRICE)", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -73,25 +73,34 @@ def webhook():
         if not tv_ticker:
             return {"error": "Missing ticker in request"}, 400
 
+        # Monetų tvarkymo logika
         clean_ticker = tv_ticker.replace(".P", "").replace("_", "").replace("-", "").replace("USDT", "")
         if clean_ticker == "PEPE":
             clean_ticker = "10000PEPE"
             
         symbol = f"{clean_ticker}/USDT:USDT"
 
-        # --- SAUGUS KAINOS GAVIMAS ---
+        # --- SAUGUS RINKOS IR KAINOS GAVIMAS TIK ŠIAI MONETAI ---
+        market = None
         ticker = None
+        
         for attempt in range(3):
             try:
+                # Svarbu: užkrauname rinkos taisykles TIK šiam konkrečiam simboliui (išvengiame Spot klaidų)
+                if not market:
+                    private_exchange.options['fetchMarkets'] = ['swap']
+                    markets = private_exchange.load_markets([symbol])
+                    market = markets[symbol]
+                
                 ticker = public_exchange.fetch_ticker(symbol)
                 if ticker:
                     break
-            except Exception as ne:
-                print(f"Klaida gaunant kainą (Bandymas {attempt + 1}/3): {ne}")
+            except Exception as e:
+                print(f"Bandymas gauti duomenis {attempt + 1}/3 nepavyko: {e}")
                 time.sleep(2)
 
-        if not ticker:
-            return {"error": "Nepavyko gauti kainos iš MEXC. Patikrinkite Proxy."}, 400
+        if not market or not ticker:
+            return {"error": "Nepavyko pasiekti MEXC rinkos duomenų. Patikrinkite Proxy."}, 400
 
         entry_price = float(ticker['ask'])
 
@@ -105,18 +114,26 @@ def webhook():
         except:
             return {"error": "Blogas kainų formatas iš TradingView"}, 400
 
-        entry_price = round(entry_price, 2 if "BTC" in symbol else 4)
-        sl_price = round(sl_price, 2 if "BTC" in symbol else 4)
+        # Naudojame oficialias biržos taisykles kainų apvalinimui (price_to_precision)
+        entry_price = float(private_exchange.price_to_precision(symbol, entry_price))
+        sl_price = float(private_exchange.price_to_precision(symbol, sl_price))
         if tp_price is not None:
-            tp_price = round(tp_price, 2 if "BTC" in symbol else 4)
+            tp_price = float(private_exchange.price_to_precision(symbol, tp_price))
 
-        # --- KIEKIO SKAIČIAVIMAS ---
-        total_value = MARGIN_USDT * DEFAULT_LEVERAGE
+        # --- SAUGUS KIEKIO SKAIČIAVIMAS (ĮVERTINANT KONTRAKTO DYDĮ) ---
+        total_value = MARGIN_USDT * DEFAULT_LEVERAGE  # 90 USDT * 10x = 900 USDT bendra vertė
         raw_crypto_amount = total_value / entry_price
         
-        final_amount = int(round(raw_crypto_amount, 0))
-        if final_amount <= 0:
-            final_amount = 1
+        # Pasiimame tikslų šios monetos kontrakto dydį (Contract Size) iš biržos taisyklių
+        contract_size = float(market.get('contractSize', 1.0))
+        total_contracts = raw_crypto_amount / contract_size
+        
+        # Užtikriname, kad nepažeistume minimalaus biržos limito
+        min_contracts = float(market['limits']['amount']['min'])
+        total_contracts = max(total_contracts, min_contracts)
+        
+        # Oficialus kiekių apvalinimas iki biržos reikalaujamo žingsnio (amount_to_precision)
+        final_amount = float(private_exchange.amount_to_precision(symbol, total_contracts))
 
         # --- SVERTO NUSTATYMAS FONE ---
         try:
@@ -132,7 +149,6 @@ def webhook():
             'timeInForce': 'PostOnly'
         }
 
-        # Svarbu: Perduodame SL ir TP tiesiai į pirminį užsakymą pagal CCXT standartą
         if sl_price:
             order_params['stopLossPrice'] = sl_price
         if tp_price:
@@ -148,7 +164,7 @@ def webhook():
             params=order_params
         )
 
-        print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis: {final_amount} | SL: {sl_price} | TP: {tp_price}")
+        print(f"SĖKMĖ: SHORT LIMIT pastatytas monetai {symbol}! Kiekis kontraktų: {final_amount} | SL: {sl_price} | TP: {tp_price}")
         return {
             "status": "success",
             "symbol": symbol,
