@@ -31,7 +31,8 @@ private_exchange_config = {
     'timeout': 30000,
     'adjustForTimeDifference': True,
     'options': {
-        'defaultType': 'swap'
+        'defaultType': 'swap',
+        'fetchCurrencies': False  # <--- IŠTAISYTA ČIA: Neleidžia CCXT užstrigti kraunant Spot valiutas fone
     }
 }
 if os.getenv('PROXY_URL'):
@@ -44,7 +45,7 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 MY_PASSWORD = "OrtofonG"
 DEFAULT_LEVERAGE = 7  # Tavo pasirinktas svertas
-MARGIN_USDT = 150.0     # Tavo pasirinkta marža
+MARGIN_USDT = 5.0     # Tavo pasirinkta marža
 
 @app.route('/')
 def home():
@@ -120,7 +121,7 @@ def webhook():
         if tp_price is not None:
             tp_price = float(private_exchange.price_to_precision(symbol, tp_price))
 
-        # --- SAUGUS KIEKIO SKAIČIAVIMAS (ĮVERTINANT KONTRAKTO DYDĮ) ---
+        # --- SAUGUS KIEKIO SKAUIČIAVIMAS (ĮVERTINANT KONTRAKTO DYDĮ) ---
         total_value = MARGIN_USDT * DEFAULT_LEVERAGE  # 90 USDT * 10x = 900 USDT bendra vertė
         raw_crypto_amount = total_value / entry_price
         
