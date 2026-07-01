@@ -44,8 +44,8 @@ private_exchange = ccxt.mexc(private_exchange_config)
 
 
 MY_PASSWORD = "OrtofonG"
-DEFAULT_LEVERAGE = 7  # Tavo pasirinktas svertas
-MARGIN_USDT = 50.0     # Tavo pasirinkta marža
+DEFAULT_LEVERAGE = 10  # Tavo pasirinktas svertas
+MARGIN_USDT = 150.0     # Tavo pasirinkta marža
 
 @app.route('/')
 def home():
